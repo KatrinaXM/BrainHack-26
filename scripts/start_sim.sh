@@ -16,8 +16,8 @@ set -euo pipefail
 
 MODEL="x500_vision"
 LAUNCH_QGC=false
-PX4_DIR="/home/${USER}/PX4-Autopilot"
-QGC_PATH="/home/${USER}/Desktop/QGroundControl-x86_64.AppImage"
+PX4_DIR="${PX4_DIR:-${HOME}/PX4-Autopilot}"
+QGC_PATH="${QGC_PATH:-${HOME}/Desktop/QGroundControl-x86_64.AppImage}"
 WORLD="roboverse"
 SESSION="px4"
 LOG_FILE="/tmp/px4_sim.log"
