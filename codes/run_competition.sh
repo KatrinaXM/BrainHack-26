@@ -40,21 +40,54 @@ fi
 # PX4 location override.
 PX4_DIR="${PX4_DIR:-${HOME}/PX4-Autopilot}"
 QGC_PATH="${QGC_PATH:-${HOME}/Desktop/QGroundControl-x86_64.AppImage}"
-STRATEGY="${BH26_STRATEGY:-spin}"
+# Strategy precedence: BH26_STRATEGY env var > interactive prompt > default 'wallfollow'.
+# Both strategies use depth-based obstacle avoidance (AvoidancePlanner.compute_clearance);
+# they differ only in how they choose the next heading.
+STRATEGY="${BH26_STRATEGY:-}"
 START_QGC=true
 LOG_FILE="/tmp/competition_run.log"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --no-qgc) START_QGC=false ;;
-        --qgc)    START_QGC=true ;;
+        --no-qgc)     START_QGC=false ;;
+        --qgc)        START_QGC=true ;;
+        --strategy)   STRATEGY="$2"; shift ;;
+        --wallfollow) STRATEGY="wallfollow" ;;
+        --spin)       STRATEGY="spin" ;;
+        --high-alt)   STRATEGY="high_alt" ;;
         --help|-h)
-            grep '^#' "$0" | head -25
+            grep '^#' "$0" | head -30
             exit 0 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
     shift
 done
+
+# If still no strategy, prompt interactively.
+if [[ -z "${STRATEGY}" ]]; then
+    echo ""
+    echo "================ Strategy ================"
+    echo "  Both strategies use depth-based obstacle avoidance"
+    echo "  (AvoidancePlanner.compute_clearance, per LearningMaterial2)."
+    echo ""
+    echo "  1) wallfollow  — pure-reactive right-hand wall-follow."
+    echo "                   Body-velocity only, EKF-drift-tolerant."
+    echo "                   Best result on the example map (5 validated)."
+    echo "  2) spin        — rotate-scan + sprint at each spot."
+    echo "                   Closer to workshop's recommended pipeline."
+    echo "                   More conservative, less coverage (1 validated)."
+    echo "  3) high_alt    — climb above walls, sweep from above."
+    echo "                   Experimental. EKF unstable past 3m altitude."
+    echo "=========================================="
+    echo ""
+    read -r -p "Select strategy [1=wallfollow / 2=spin / 3=high_alt, default 1]: " choice
+    case "${choice}" in
+        2)    STRATEGY="spin" ;;
+        3)    STRATEGY="high_alt" ;;
+        *)    STRATEGY="wallfollow" ;;
+    esac
+    echo "→ using strategy: ${STRATEGY}"
+fi
 
 # Make Ctrl-C clean up everything we started.
 cleanup() {

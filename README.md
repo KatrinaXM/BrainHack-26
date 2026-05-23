@@ -64,23 +64,40 @@ BH26_STRATEGY=high_alt               ./run_competition.sh  # experimental
 BH26_DISPLAY=0                       ./run_competition.sh  # headless mode
 ```
 
-## What the mission does (default: `wallfollow` strategy)
+## Strategies
 
-1. Take off to ~1.2 m altitude.
-2. Loop forever (until 280 s bailout): read depth, compute left/centre/right clearance, choose one of:
+`run_competition.sh` prompts at launch which strategy to use. Override the prompt with `--wallfollow / --spin / --high-alt`, `--strategy <name>`, or `BH26_STRATEGY=<name>` env var.
+
+**All three strategies use the same depth-based obstacle avoidance** (`AvoidancePlanner.compute_clearance`), which is what the Qualifier rules require. They differ in *how* they choose the next heading.
+
+### 1. `wallfollow` (default — best observed result)
+
+1. Take off to ~1.2 m.
+2. Loop until 280 s bailout: read depth, compute left/centre/right clearance, choose one of:
    - **FORWARD** if center > 2.5 m
    - **DRIFT_RIGHT** if center > 1.0 m and right > 2.5 m (creep + lean)
    - **TURN_RIGHT** if right > 2.5 m
    - **TURN_LEFT** if left > 2.5 m
    - **BACK_UP + spin** if all blocked
-3. **Body-frame velocity commands only.** No NED position setpoints. EKF drift becomes irrelevant to navigation; IMU yaw + depth are the only inputs.
-4. Bail at 280 s.
+3. **Body-frame velocity commands only.** No NED position setpoints — EKF drift is irrelevant to navigation; IMU yaw + depth are the only inputs.
 
-Result on the example map vs the earlier spin-at-spots strategy: **5 validated detections (3 yellow + 2 red — matches ground truth) versus 1 red**.
+Single-run result on the example map: **5 validated detections (3 yellow + 2 red — matches ground truth)**.
 
-Alternate strategies (selectable via `BH26_STRATEGY` env var):
-- `spin` — earlier rotate-scan + sprint approach. Less coverage.
-- `high_alt` — climb above wall tops, lawnmower from above. Experimental.
+### 2. `spin` (closer to workshop's recommended pipeline)
+
+1. Take off, rotate 360° in place to scan all directions.
+2. Pick the heading with best clearance + bias against backtracking.
+3. Sprint forward up to 12 m via bounded position setpoints.
+4. Repeat for up to 12 spots or until 280 s.
+
+Uses the AvoidancePlanner exactly as Material 2 slide 30 describes (NED position setpoints, "closed-loop pipeline"). More conservative — stays near spawn (~5-10 m). Single-run result: **1 validated red**.
+
+### 3. `high_alt` (experimental)
+
+1. Take off, climb to 6.5 m altitude (above wall tops).
+2. Lawnmower-sweep at altitude.
+
+EKF Z drifts past ~3 m altitude on this VM, so the drone tends to dive back down mid-mission. Recorded for completeness.
 
 YOLO detections are projected to NED via pixel + depth + drone pose, then
 deduplicated (4 m radius) and validated (hits ≥ 2 OR conf ≥ 0.75).
