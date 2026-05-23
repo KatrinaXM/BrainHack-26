@@ -741,10 +741,74 @@ class Mission:
             await asyncio.sleep(0.1)
 
     # -----------------------------------------------------------------
+    # High-altitude survey — climb above wall tops, sweep ground from above
+    # -----------------------------------------------------------------
+    async def _main_loop_high_alt(self) -> None:
+        """Strategy: climb to ALTITUDE_SURVEY_DOWN (well above wall tops),
+        fly forward in body frame for a fixed time, then turn 90° and
+        repeat. The forward-facing camera looks at a band of ground below
+        and ahead, so YOLO sweeps a wide footprint per second.
+
+        No avoidance stops, no spins. EKF stays stable because we're not
+        colliding with anything."""
+        # Climb to survey altitude.
+        self._target_down = cfg.ALTITUDE_SURVEY_DOWN
+        print(f"[mission] climbing to survey altitude (down={cfg.ALTITUDE_SURVEY_DOWN:.1f} m)")
+        await self._climb_to_target(cfg.ALTITUDE_SURVEY_DOWN, timeout_s=15.0)
+
+        sprint_idx = 0
+        # Alternating turn pattern: right, right, left, left, right, right, ...
+        # which produces a lawnmower coverage on a flat plane.
+        turn_pattern = [+90.0, +90.0, -90.0, -90.0]
+
+        while not self._stop.is_set():
+            elapsed = time.time() - self._mission_t0
+            if elapsed > cfg.BAILOUT_SECONDS:
+                print(f"[mission] bailout at t={elapsed:.1f} s")
+                break
+
+            pose = self.state.snapshot()
+            if pose is None:
+                await asyncio.sleep(0.2)
+                continue
+            if self._is_ekf_runaway(pose):
+                print(f"[mission] EKF horizontal runaway: "
+                      f"pos=({pose['north']:.1f},{pose['east']:.1f}) — aborting")
+                break
+
+            print(f"[mission] === SPRINT {sprint_idx+1} t={elapsed:.0f}s "
+                  f"pos=({pose['north']:+.1f},{pose['east']:+.1f},{pose['down']:+.1f}) "
+                  f"yaw={pose['yaw_deg']:+.1f} ===")
+
+            # Long forward sprint at high altitude. The depth-clearance check
+            # is still active for safety, but at altitude 6.5 m the depth
+            # image is dominated by the ground 7-14 m ahead, which is well
+            # above SAFE_DISTANCE so blocking is rare.
+            reason = await self._fly_forward_via_position(
+                max_distance=cfg.SURVEY_SPRINT_M,
+                max_seconds=cfg.SURVEY_SPRINT_TIMEOUT_S)
+            print(f"[mission] sprint stopped: {reason}")
+            if reason == "ekf_runaway":
+                break
+
+            # Lawnmower-style turn: pick the next angle from the pattern.
+            turn_deg = turn_pattern[sprint_idx % len(turn_pattern)]
+            sprint_idx += 1
+            pose = self.state.snapshot()
+            if pose is None:
+                continue
+            new_yaw = ((pose["yaw_deg"] + turn_deg + 540.0) % 360.0) - 180.0
+            print(f"[mission] lawn turn {turn_deg:+.0f}° → yaw {new_yaw:+.1f}°")
+            await self._yaw_only_rotate_to(new_yaw, tolerance=8.0, timeout_s=5.0)
+
+    # -----------------------------------------------------------------
     # Old wall-follow loop kept as reference; main_loop now delegates.
     # -----------------------------------------------------------------
     async def _main_loop(self) -> None:
-        await self._main_loop_spin()
+        if cfg.STRATEGY == "high_alt":
+            await self._main_loop_high_alt()
+        else:
+            await self._main_loop_spin()
 
     async def _main_loop_wallfollow(self) -> None:
         visited_cells = set()

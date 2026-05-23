@@ -193,6 +193,19 @@ SHUTDOWN_GRACE_SECONDS = 30
 
 
 # -------------------------------------------------------------------
+# Strategy selector
+# -------------------------------------------------------------------
+# "spin"      — v9 default: rotate-scan + sprint at each spot
+# "high_alt"  — experiment: climb above walls, lawnmower-sweep from above
+STRATEGY = os.environ.get("BH26_STRATEGY", "spin")
+
+# High-altitude survey parameters.
+ALTITUDE_SURVEY_DOWN = -6.5        # NED down → 6.5 m above ground (under 8 m ceiling)
+SURVEY_SPRINT_M = 15.0             # max distance per forward burst
+SURVEY_SPRINT_TIMEOUT_S = 18.0     # hard cap on each forward burst
+
+
+# -------------------------------------------------------------------
 # Output paths
 # -------------------------------------------------------------------
 OUTPUT_BASE = "/mnt/hgfs/Shared"
