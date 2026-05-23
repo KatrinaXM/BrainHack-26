@@ -741,10 +741,164 @@ class Mission:
             await asyncio.sleep(0.1)
 
     # -----------------------------------------------------------------
-    # Old wall-follow loop kept as reference; main_loop now delegates.
+    # Strategy dispatcher. Select via BH26_STRATEGY env var:
+    #   spin       (default) — rotate-scan + sprint at each spot (v9)
+    #   wallfollow            — pure-reactive right-hand wall-follow
+    #   high_alt              — climb above walls, lawnmower from above
     # -----------------------------------------------------------------
     async def _main_loop(self) -> None:
-        await self._main_loop_spin()
+        if cfg.STRATEGY == "wallfollow":
+            await self._main_loop_wallfollow_reactive()
+        elif cfg.STRATEGY == "high_alt":
+            await self._main_loop_high_alt()
+        else:
+            await self._main_loop_spin()
+
+    # -----------------------------------------------------------------
+    # High-altitude survey — climb above wall tops, sweep ground from above
+    # -----------------------------------------------------------------
+    async def _main_loop_high_alt(self) -> None:
+        """Climb to ALTITUDE_SURVEY_DOWN, fly forward in body frame, turn 90°
+        every fixed interval, repeat. No avoidance stops, no spins."""
+        self._target_down = cfg.ALTITUDE_SURVEY_DOWN
+        print(f"[mission] climbing to survey altitude "
+              f"(down={cfg.ALTITUDE_SURVEY_DOWN:.1f} m)")
+        await self._climb_to_target(cfg.ALTITUDE_SURVEY_DOWN, timeout_s=20.0)
+
+        sprint_idx = 0
+        # Alternating turn pattern: produces a lawnmower coverage.
+        turn_pattern = [+90.0, +90.0, -90.0, -90.0]
+
+        while not self._stop.is_set():
+            elapsed = time.time() - self._mission_t0
+            if elapsed > cfg.BAILOUT_SECONDS:
+                print(f"[mission] bailout at t={elapsed:.1f} s")
+                break
+
+            pose = self.state.snapshot()
+            if pose is None:
+                await asyncio.sleep(0.2)
+                continue
+            if self._is_ekf_runaway(pose):
+                print(f"[mission] EKF horizontal runaway: "
+                      f"pos=({pose['north']:.1f},{pose['east']:.1f}) — aborting")
+                break
+
+            print(f"[mission] === SPRINT {sprint_idx+1} t={elapsed:.0f}s "
+                  f"pos=({pose['north']:+.1f},{pose['east']:+.1f},{pose['down']:+.1f}) "
+                  f"yaw={pose['yaw_deg']:+.1f} ===")
+
+            reason = await self._fly_forward_via_position(
+                max_distance=cfg.SURVEY_SPRINT_M,
+                max_seconds=cfg.SURVEY_SPRINT_TIMEOUT_S)
+            print(f"[mission] sprint stopped: {reason}")
+            if reason == "ekf_runaway":
+                break
+
+            turn_deg = turn_pattern[sprint_idx % len(turn_pattern)]
+            sprint_idx += 1
+            pose = self.state.snapshot()
+            if pose is None:
+                continue
+            new_yaw = ((pose["yaw_deg"] + turn_deg + 540.0) % 360.0) - 180.0
+            print(f"[mission] lawn turn {turn_deg:+.0f}° → yaw {new_yaw:+.1f}°")
+            await self._yaw_only_rotate_to(new_yaw, tolerance=8.0, timeout_s=5.0)
+
+    # -----------------------------------------------------------------
+    # Pure-reactive right-hand wall-follow.
+    #
+    # Body-frame velocity only — never sends NED position setpoints, so
+    # EKF drift is irrelevant to navigation. Decision tree per depth
+    # frame: forward / right / left / back-up. IMU yaw stays accurate
+    # (IMU is independent of EKF position state), so the drone reliably
+    # turns to face cleared directions.
+    #
+    # EKF position is used only to project YOLO bounding boxes into NED
+    # for barrel deduplication; drift makes the reported positions wrong
+    # but consistent — same physical barrel from same vantage projects
+    # to same drifted NED, so dedup still works.
+    # -----------------------------------------------------------------
+    async def _main_loop_wallfollow_reactive(self) -> None:
+        # Climb to working altitude first using bounded vertical velocity.
+        self._target_down = cfg.ALTITUDE_LOW_DOWN
+        self._alt_phase = "low"
+        print(f"[wf] climbing to {cfg.ALTITUDE_LOW_DOWN:.1f} m down")
+        await self._climb_to_target(cfg.ALTITUDE_LOW_DOWN, timeout_s=10.0)
+
+        state = "FORWARD"
+        state_t = time.time()
+        backup_count = 0
+        last_log_t = 0.0
+        loop_dt = 1.0 / cfg.LOOP_HZ
+
+        SAFE = cfg.SAFE_DISTANCE
+        CRIT = cfg.CRITICAL_DISTANCE
+
+        while not self._stop.is_set():
+            elapsed = time.time() - self._mission_t0
+            if elapsed > cfg.BAILOUT_SECONDS:
+                print(f"[wf] bailout at t={elapsed:.1f}s")
+                break
+
+            pose = self.state.snapshot()
+            if pose is None:
+                await asyncio.sleep(loop_dt)
+                continue
+
+            # Periodically toggle altitude phase so we catch red barrels too.
+            self._maybe_switch_altitude_phase(elapsed)
+
+            # Pull depth + clearance. nans become 0 (treated as "blocked").
+            depth = self.depth_receiver.get_frame()
+            if depth is None:
+                await asyncio.sleep(loop_dt)
+                continue
+            try:
+                left, center, right = self.planner.compute_clearance(depth)
+            except Exception:
+                left = center = right = float("inf")
+            left   = left   if math.isfinite(left)   else 0.0
+            center = center if math.isfinite(center) else 0.0
+            right  = right  if math.isfinite(right)  else 0.0
+
+            # Altitude correction in body-down (small, continuous).
+            v_down = self._altitude_correction_velocity(pose)
+
+            # Decision tree — right-hand-rule wall follower.
+            if center > SAFE:
+                new_state = "FORWARD"
+                v_fwd, yawrate = cfg.WF_FORWARD_SPEED, 0.0
+                backup_count = 0
+            elif center > CRIT and right > SAFE:
+                new_state = "DRIFT_RIGHT"
+                v_fwd, yawrate = cfg.WF_TURN_SPEED, +cfg.WF_TURN_RATE
+                backup_count = 0
+            elif right > SAFE:
+                new_state = "TURN_RIGHT"
+                v_fwd, yawrate = 0.0, +cfg.WF_TURN_RATE
+                backup_count = 0
+            elif left > SAFE:
+                new_state = "TURN_LEFT"
+                v_fwd, yawrate = 0.0, -cfg.WF_TURN_RATE
+                backup_count = 0
+            else:
+                new_state = "BACK_UP"
+                v_fwd, yawrate = -cfg.WF_BACKUP_SPEED, +cfg.WF_ESCAPE_YAW
+                backup_count += 1
+
+            # Diagnostics: log state transitions + a heartbeat every ~2 s.
+            now = time.time()
+            if new_state != state or (now - last_log_t) > 2.0:
+                print(f"[wf] t={elapsed:5.1f}s state={new_state:11s} "
+                      f"L={left:.2f} C={center:.2f} R={right:.2f} "
+                      f"pos=({pose['north']:+.1f},{pose['east']:+.1f},{pose['down']:+.1f}) "
+                      f"yaw={pose['yaw_deg']:+.1f}")
+                last_log_t = now
+            if new_state != state:
+                state, state_t = new_state, now
+
+            await self.drone.send_body_velocity(v_fwd, 0.0, v_down, yawrate)
+            await asyncio.sleep(loop_dt)
 
     async def _main_loop_wallfollow(self) -> None:
         visited_cells = set()

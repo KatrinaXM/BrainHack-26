@@ -93,6 +93,26 @@ FORWARD_STEP_TIMEOUT_S = 12.0   # hard cap on each forward burst
 # when actually blocked.
 PERIODIC_SCAN_INTERVAL_S = 1e9
 
+# -------------------------------------------------------------------
+# Strategy selector
+# -------------------------------------------------------------------
+# "spin"        — default v9: rotate-scan + sprint at each spot
+# "wallfollow"  — pure-reactive right-hand wall-follow (body-velocity only)
+# "high_alt"    — climb above walls, lawnmower-sweep from above
+STRATEGY = os.environ.get("BH26_STRATEGY", "wallfollow")
+
+# Wall-follow parameters.
+WF_FORWARD_SPEED = 0.8         # m/s when path is clear
+WF_TURN_SPEED    = 0.3         # m/s while leaning right/left
+WF_TURN_RATE     = 25.0        # deg/s for in-place turns when blocked
+WF_BACKUP_SPEED  = 0.2         # m/s while backing up from a fully-blocked spot
+WF_ESCAPE_YAW    = 60.0        # deg/s spin rate during back-up
+
+# High-altitude survey parameters.
+ALTITUDE_SURVEY_DOWN     = -6.5        # NED down → 6.5 m above ground
+SURVEY_SPRINT_M          = 15.0        # max distance per forward burst
+SURVEY_SPRINT_TIMEOUT_S  = 18.0        # hard cap on each forward burst
+
 # Vertical control.
 MAX_VERTICAL_SPEED = 0.4        # m/s in body-down direction; soft cap
 
