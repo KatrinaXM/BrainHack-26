@@ -1,0 +1,165 @@
+RoboVerse 2026 Qualifier — Run Instructions (v9 mission)
+==========================================================
+
+WHAT THIS CODE DOES
+-------------------
+The drone takes off, then visits up to 12 "spots" in the world. At each
+spot it does ONE slow 360° rotation (~15s) so the depth camera + YOLO can
+see every direction, then sprints forward up to 12m to the next spot.
+Spot selection biases toward unexplored headings using the depth clearance.
+YOLO detections are projected into NED coordinates and deduplicated; the
+output is written to /mnt/hgfs/Shared/barrels.json.
+
+The mission bails at 280 s (under the 5-minute time-bonus cliff) and
+returns to land. The competition rules allow multiple attempts within
+the 10-minute window — best score counts. Plan to RE-RUN 2-3 times.
+
+
+PRE-FLIGHT (one time on the judge's laptop)
+-------------------------------------------
+- Python deps: cv2, mavsdk, gz.transport13, gz.msgs10, torch, ultralytics, pymavlink.
+- PX4 build: gz_x500_vision in ~/PX4-Autopilot.
+- OakD-Lite SDF MUST be the lightweight 640x480 @ 10 Hz version
+  (~/PX4-Autopilot/Tools/simulation/gz/models/OakD-Lite/model.sdf).
+- barrel_yolo.pt MUST be present in ~/Desktop/codes/.
+- ~/start_sim.sh, ~/stop_sim.sh, ~/set_ekf_origin.py executable.
+
+
+LAUNCH SEQUENCE (during the 15-minute setup window)
+---------------------------------------------------
+Terminal 1:
+  cd ~
+  ./stop_sim.sh                # ensure nothing stale
+  ./start_sim.sh --no-qgc
+
+Wait for: "PX4 SITL is ready (pxh> prompt available)..."
+
+Terminal 2:
+  python3 ~/set_ekf_origin.py
+
+Wait for: "[set_ekf_origin] HOME_POSITION received ... EKF OK."
+
+Terminal 3:
+  cd ~/Desktop/codes
+  PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python python3 mission.py
+
+Expected log markers (in order):
+  [vision] subscribed: /world/roboverse/.../IMX214/image
+  === BrainHack-26 mission start ===
+  [health] armable=True ...
+  [mission] arming + taking off
+  [mission] offboard active
+  [mission] === SPOT 1 t=0s ...
+  [mission] scanning at spot 1
+  [mission] outward heading ...
+  [mission] sprint toward yaw=...
+  [mission] sprint stopped: max_distance | timeout | blocked
+  [barrel] fuel_barrel_<color> @ (n, e, d) conf=... hits=... (total: N)
+  ...
+  [mission] bailout at t=280.x s
+  [mission] raw detections:       total=...
+  [mission] validated detections: total=...
+  [mission] barrels.json -> /mnt/hgfs/Shared/barrels.json
+
+
+WHAT JUDGES WILL SEE
+--------------------
+- A live "YOLO Detections" OpenCV window. Every time YOLO finds a barrel
+  with conf >= 0.45, an annotated frame is shown with bounding boxes and
+  the class name. This is the live evidence during the run.
+- Annotated frames are ALSO saved to /mnt/hgfs/Shared/yolo_detections/
+  (file names: det_<n>_<ms-timestamp>.jpg). These are persistent backup
+  evidence for after the run.
+- /mnt/hgfs/Shared/barrels.json with two lists:
+    * barrels  (raw — all dedup'd detections)
+    * validated  (the entries that meet the validation filter:
+                 hits >= 2 OR confidence >= 0.75)
+  Judges should look at `validated_total` and `validated_by_class` to
+  count unique detections, NOT the raw counts (which include single
+  low-confidence noise hits).
+
+
+BETWEEN ATTEMPTS
+----------------
+Each attempt:
+  Terminal 1:  ./stop_sim.sh
+               ./start_sim.sh --no-qgc
+  Terminal 2:  python3 ~/set_ekf_origin.py
+  Terminal 3:  PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python python3 mission.py
+
+The mission's BarrelTracker resets per-attempt — barrels.json gets
+overwritten. To preserve a good attempt's output:
+  cp /mnt/hgfs/Shared/barrels.json /mnt/hgfs/Shared/barrels_attempt_N.json
+  cp -r /mnt/hgfs/Shared/yolo_detections /mnt/hgfs/Shared/yolo_detections_attempt_N
+
+The competition counts the BEST attempt within 10 minutes (rule p.1):
+> "the teams can make more than 1 attempt. The score will be based on the
+>  best attempt."
+
+
+SUBMISSION COPY (USB stick contents)
+------------------------------------
+On the night before competition, copy to a removable drive:
+  /codes/
+    mission.py
+    mission_config.py
+    barrel_tracker.py
+    drone_control.py
+    depth_receiver.py
+    Detector.py
+    AvoidancePlanner.py
+    get_position_with_task.py
+    barrel_yolo.pt
+    RUN.txt  (this file)
+  /scripts/
+    start_sim.sh
+    stop_sim.sh
+    set_ekf_origin.py
+    set_ekf_origin.sh
+  /sdf-patches/
+    OakD-Lite.sdf  (the 640x480 @ 10Hz patched version)
+  /docs/
+    JUDGE_SUMMARY.md
+    HANDOVER_DEPTH.md  (background on the x500_vision EKF behaviour)
+
+
+KNOWN LIMITATIONS (be honest with judges if asked)
+--------------------------------------------------
+- x500_vision SITL's "VIO" is a noisy Gazebo-ground-truth feed that PX4's
+  EKF can't reliably reject. Position estimates may drift ~5-15 m during
+  a single 280-second flight.
+- This means the NED coordinates in barrels.json are NOT absolute
+  ground-truth positions; they are *consistent with each other for dedup*
+  but offset from the world frame by the accumulated EKF drift.
+- Practically, this caps how far the drone can effectively *navigate*
+  toward distant barrels. Mid-mission re-runs (the multi-attempt rule)
+  partially compensate.
+- The drone is spawn-area-biased — its physical motion per flight is
+  ~5-10 m even with 12m setpoint sprints. This is why we run multiple
+  attempts.
+
+
+TROUBLESHOOTING
+---------------
+- "is_armable=False" persists > 30 s:
+    Re-run set_ekf_origin.py. If still failing, ./stop_sim.sh and start over.
+
+- "Connection refused" to UDP 14540:
+    PX4 isn't running. Verify with `screen -ls` (should show 'px4' session).
+
+- "Socket closed" or "AioRpcError" mid-flight:
+    PX4 crashed (rare, but happens after very long flights). stop_sim + start_sim
+    + set_ekf + re-run mission.
+
+- "depth all-inf / no-frame":
+    Stop sim, restart sim, re-run set_ekf_origin, re-run mission. If still
+    all-inf, OakD-Lite SDF may have been overwritten — restore from the
+    /sdf-patches/ copy on the USB drive.
+
+- "Address already in use" on port 14540:
+    Stale mavsdk_server from a previous run. `pkill -9 mavsdk_server`.
+
+- Drone flies into walls / spins / pose runs away:
+    The EKF has diverged. Mission's _is_ekf_runaway check will catch this
+    and abort, then re-land. If land also fails, manually run stop_sim and
+    re-run.
