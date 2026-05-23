@@ -64,14 +64,23 @@ BH26_STRATEGY=high_alt               ./run_competition.sh  # experimental
 BH26_DISPLAY=0                       ./run_competition.sh  # headless mode
 ```
 
-## What the mission does
+## What the mission does (default: `wallfollow` strategy)
 
 1. Take off to ~1.2 m altitude.
-2. Spin 360° in place (~15 s) so the depth camera + YOLO see all directions.
-3. Pick the heading with best clearance + bias away from previous transits.
-4. Sprint forward up to 12 m via bounded position setpoints.
-5. Repeat up to 12 times or until 280 s elapse.
-6. Return-to-launch + land.
+2. Loop forever (until 280 s bailout): read depth, compute left/centre/right clearance, choose one of:
+   - **FORWARD** if center > 2.5 m
+   - **DRIFT_RIGHT** if center > 1.0 m and right > 2.5 m (creep + lean)
+   - **TURN_RIGHT** if right > 2.5 m
+   - **TURN_LEFT** if left > 2.5 m
+   - **BACK_UP + spin** if all blocked
+3. **Body-frame velocity commands only.** No NED position setpoints. EKF drift becomes irrelevant to navigation; IMU yaw + depth are the only inputs.
+4. Bail at 280 s.
+
+Result on the example map vs the earlier spin-at-spots strategy: **5 validated detections (3 yellow + 2 red — matches ground truth) versus 1 red**.
+
+Alternate strategies (selectable via `BH26_STRATEGY` env var):
+- `spin` — earlier rotate-scan + sprint approach. Less coverage.
+- `high_alt` — climb above wall tops, lawnmower from above. Experimental.
 
 YOLO detections are projected to NED via pixel + depth + drone pose, then
 deduplicated (4 m radius) and validated (hits ≥ 2 OR conf ≥ 0.75).
