@@ -98,6 +98,7 @@ class GazeboPose:
         self._y: Optional[float] = None
         self._z: Optional[float] = None
         self._t_last: float = 0.0
+        self._frame_id_checked: bool = False
         self._node = GzNode()
 
         topic = f"/model/{drone_name}/pose"
@@ -107,14 +108,31 @@ class GazeboPose:
         print(f"[bridge] gz subscribed: {topic}")
 
     def _cb(self, msg: Pose_V):
-        for p in msg.pose:
-            if p.name == self._drone_name:
-                with self._lock:
-                    self._x = p.position.x
-                    self._y = p.position.y
-                    self._z = p.position.z
-                    self._t_last = time.time()
-                return
+        # /model/<name>/pose emits a single entry with an empty `name` field;
+        # the model identity lives in header.data[frame_id] = "<name>/odom".
+        # We subscribed to a model-specific topic, so the first entry is ours —
+        # but verify frame_id once, so a wrong drone name fails loudly.
+        if not msg.pose:
+            return
+        p = msg.pose[0]
+        if not self._frame_id_checked:
+            fid = ""
+            for d in p.header.data:
+                if d.key == "frame_id" and d.value:
+                    fid = d.value[0]
+                    break
+            expected = f"{self._drone_name}/odom"
+            if fid and fid != expected:
+                print(f"[bridge] WARNING: pose frame_id={fid!r} but expected {expected!r}; "
+                      f"check BH26_UWB_DRONE")
+            self._frame_id_checked = True
+        with self._lock:
+            self._x = p.position.x
+            self._y = p.position.y
+            self._z = p.position.z
+            if self._t_last == 0.0:
+                print(f"[bridge] first gz pose: x={self._x:.3f} y={self._y:.3f} z={self._z:.3f}")
+            self._t_last = time.time()
 
     def get(self) -> Optional[tuple]:
         """Returns (x, y, z) in Gazebo world frame, or None if no sample yet."""

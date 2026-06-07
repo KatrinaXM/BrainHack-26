@@ -292,12 +292,15 @@ These are **real bugs** in the workshop's reference. If you're using kolomee as 
 
 | Line | Issue | Severity | Fix |
 |---|---|---|---|
+| `:128-132` | Initial UWB-wait loop reads `uwb_pos = get_uwb_position()` but never updates `state` — loop condition is forever stuck at the initial `state=False` | **High — script never proceeds past startup if UWB isn't already ready at line 128** | Change `uwb_pos = get_uwb_position()` to `n, e, state = get_uwb_position()` |
 | `:168` | `send_velocity(0.0, 0.0, 0.0)` missing `await` | Medium — silently does nothing in the UWB-not-ready branch | Add `await` |
 | `:174` | Same — UWB OK but height not ready branch | Medium | Add `await` |
 | `:176` | `continue` without `await asyncio.sleep(...)` before it | Low (would spin only if height stayed broken forever) | Add `await asyncio.sleep(0.5)` before `continue` |
 | `:36, :154, :218` | `KP_SCALE` declared and passed as parameter, then immediately overwritten on `:218` | Cosmetic — confusing dead code | Delete the parameter and the constant |
 | Everywhere | Pure P-control, no derivative term | Design choice — see §2 insight | Accept it; PID needs Kalman pre-filtering for UWB |
 | `:228` | Vertical saturation written as nested `if/else` with three branches when one `min/max` would do | Cosmetic | Replace with `vd = max(-MAX_VEL_Z, min(MAX_VEL_Z, vd))` |
+| n/a | No `import sys` despite `sys.exit(0)` on `:325` | Low — only matters if user types 'n' to the prompt | `import sys` (or just remove the exit branch) |
+| n/a | No auto-takeoff before offboard. Real hardware operator manually takes off via RC; SITL has no operator — drone stays on the ground forever | High — for SITL only. Add `drone.action.takeoff()` + wait-for-altitude before `offboard.start()` | See `codes/finals/kolomee_sitl.py` for the SITL-specific block |
 
 `★ Insight ─────────────────────────────────────`
 - The missing-`await` bug is **the** classic asyncio mistake. Without `await`, the coroutine is created but never run; Python doesn't even warn (sometimes). The function silently no-ops. In kolomee's failure-path code, this means **the drone keeps moving with its last commanded velocity when UWB drops**, rather than stopping like the comment claims. This is a safety issue — fix before flying.
@@ -552,6 +555,36 @@ async def run_stage1():
 ```
 
 Three new modules. Each gets its own follow-up dissection when we build it.
+
+---
+
+## 11. SITL verification log (2026-06-07)
+
+We brought up `sim_uwb_bridge.py` + Qualifier Gazebo SITL + an adapted `codes/finals/kolomee_sitl.py` and confirmed the data-path end-to-end. Findings:
+
+**Bridge (`codes/sim_uwb_bridge.py`)** — works, with one pre-existing bug fixed before first successful run:
+
+- The `Pose_V` on `/model/x500_vision_0/pose` has **a single entry with empty `name` field**; identity lives in `header.data["frame_id"] = "x500_vision_0/odom"`. Filtering on `p.name == drone_name` silently never matched. Fixed by taking the first entry and using `frame_id` as a one-shot identity check.
+- Noise levels 0 and 1 verified: perfect mode publishes GT exactly, noise=1 (seed=42) shows realistic ~10 cm σ wobble.
+- ROS2 sensor-topic subscribers must specify `--qos-reliability best_effort` (or use `QoSPresetProfiles.SENSOR_DATA`). `ros2 topic hz` does **not** accept the QoS flag — use `ros2 topic echo` for sampling instead.
+- Coordinate swap (`bridge.position.x = Gazebo.y`, `bridge.position.y = Gazebo.x`) works as designed: kolomee's `self.n = msg.pose.position.y` / `self.e = msg.pose.position.x` re-maps cleanly.
+
+**`kolomee_sitl.py` integration** — runs end-to-end after bug fixes (see §5.4 table updates):
+
+- Connection string changed `serial://` → `udpin://0.0.0.0:14540`.
+- Init-loop `state` re-read bug fixed (was the actual cause of "Waiting for UWB data..." infinite loop on first attempt).
+- Lines `:168, :174` `await` added; line `:176` got an `await asyncio.sleep(0.5)`.
+- Inserted SITL-only auto-takeoff block before `offboard.start()` (real hardware skips this — operator launches via RC).
+
+**What worked end-to-end:** UWB ready → MAVSDK connect → EKF healthy → arm → auto-takeoff to 0.7m → offboard mode → velocity setpoints flowing toward UWB-derived waypoint. Drone reached **peak N = 0.99 / target 1.00** before the next issue dominated.
+
+**What's still blocked in SITL (not in scope to fix):**
+
+- PX4's EKF on the Qualifier Gazebo airframe diverges in altitude (D=-0.76 → -28.82 → +446m within 60-90s). This is the same `gz-sim-odometry-publisher`-feeds-noisy-VIO issue documented in the `experiment/ekf-tuning` branch. The kolomee outer loop (UWB-driven) is unaffected, but PX4's inner velocity controller uses EKF state and starts commanding nonsense attitudes.
+- The Qualifier-era `px4-patches/4005_gz_x500_vision.tuned` may help; not applied this session.
+- Real Finals hardware uses RealSense T265-style VIO with different EKF tuning — Qualifier patches don't transfer directly.
+
+**Practical takeaway:** the bridge + kolomee data path is verified. Use SITL for *data-flow* tests (mission logic, UWB ingestion, MAVSDK plumbing, waypoint sequencing) — but expect mission completion to require either patched EKF gates or real hardware.
 
 ---
 
