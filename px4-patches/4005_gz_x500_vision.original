@@ -1,0 +1,19 @@
+#!/bin/sh
+#
+# @name Gazebo x500 vision
+#
+# @type Quadrotor
+#
+
+PX4_SIM_MODEL=${PX4_SIM_MODEL:=x500_vision}
+
+# Enable External Vision (EV) fusion for position and yaw
+param set-default EKF2_EV_CTRL 3
+
+# Set vision as the primary height source (optional, use 0 for baro, 2 for rangefinder)
+param set-default EKF2_HGT_REF 3
+
+# Disable GPS if you want to rely purely on vision
+param set-default EKF2_GPS_CTRL 0
+
+. ${R}etc/init.d-posix/airframes/4001_gz_x500
