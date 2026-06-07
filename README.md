@@ -1,4 +1,23 @@
-# BrainHack-26 RoboVerse Qualifier
+# BrainHack-26 RoboVerse
+
+This repo started as our Qualifier entry (autonomous barrel detection in PX4 SITL + Gazebo) and is now being extended for the Finals (real-hardware Mapping Drone + HULA swarm).
+
+**Where things live now:**
+
+| For… | Read… |
+|---|---|
+| **Onboarding from scratch** | `TUTORIAL.md` Part 1 (Qualifier concepts: NED, MAVSDK, async, intrinsics) → Part 2 (Finals concepts: UWB, ArUco, RKNN, pyhulax, ROS2) |
+| **Step-by-step prep with gates** | `RUNBOOK.md` Phases 0-6 (Qualifier, done) → Phases 7-15 (Finals, in progress) |
+| **Workshop reference code** | `references/qualifier_codes/` and `references/finalist_codes/` |
+| **Competition rule sheets** | `materials/RoboVerse 2026 Qualifier.pdf` and `materials/RoboVerse 2026 Finals.pdf` |
+| **Deep architecture reads** | `docs/kolomee_dissection.md` (the workshop's reference UWB nav script, line-by-line) |
+| **Background on the Qualifier SITL EKF problem** | `HANDOVER_DEPTH.md` |
+
+The original Qualifier mission code (`codes/mission.py` and friends) stays in-place. It still flies in Gazebo and is the basis for the upcoming sim-based testing of Finals navigation code (Phase 7+). Nothing has been deleted.
+
+---
+
+## Qualifier section (still useful, still works)
 
 Autonomous barrel-detection mission for the `x500_vision` drone in PX4 SITL +
 Gazebo Harmonic. Built for the BrainHack-26 RoboVerse Qualifier 2026.

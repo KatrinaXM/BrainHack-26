@@ -481,4 +481,572 @@ After that, you'll be ready to start writing.
 
 ---
 
-*End of tutorial. If a concept still feels fuzzy after reading the relevant section twice, send the exact sentence that confuses you and I'll re-explain it with a different analogy.*
+*End of qualifier tutorial. If a concept still feels fuzzy after reading the relevant section twice, send the exact sentence that confuses you and I'll re-explain it with a different analogy.*
+
+---
+
+# PART 2 — Finals tutorial
+
+> Read this only after you've internalised Part 1 (NED, MAVSDK, async, intrinsics, offboard mode). Everything in Part 1 still applies — the Finals just replace the simulator with real hardware and add new sensors/libraries on top.
+>
+> Reading time: ~60 minutes. Re-readable as a reference.
+
+---
+
+## 18. The big picture, mark 2
+
+You no longer fly a simulated drone in Gazebo. Instead:
+
+- **Stage 1 (University only — Reconnaissance):** you fly one **Mapping Drone** over an arena. It carries an **Intel RealSense stereo depth camera**, a **Rockchip NPU** for fast YOLO, a **UWB tag** that broadcasts its x,y position into the arena's positioning system, and an onboard Linux box you reach via **NoMachine** remote desktop. Your code produces a top-down depth map and identifies which landing pads are valid by decoding **ArUco markers** placed next to each.
+- **Stage 2 (Deployment & Ambush):** Using your Stage-1 map, you pick 3 landing zones. You launch 3× **Highgreat HULA** drones from the **C2 Terminal** (a Windows laptop running an Ubuntu VM) via the **pyhulax** library. The HULAs land on the chosen pads. Then 5× **RoboMaster ground robots** enter the cage as a "convoy"; the HULAs search for them and capture snapshot images.
+
+The mental model: Stage 1 is "build the map"; Stage 2 is "execute on the map". The good news is your Qualifier code (MAVSDK offboard, YOLO pipeline, depth→world projection) **transfers wholesale** — only the libraries supplying camera frames, position, and inference change.
+
+`★ Insight ─────────────────────────────────────`
+- The Qualifier taught you to bypass a broken pose estimator with body-velocity wall-follow. The Finals give you a *working* pose estimator (UWB) — so the Workshop's prescribed pipeline (poll position → compute error → send velocity command) finally works. **kolomee.py is that pipeline.**
+- This is a "real hardware" event: you cannot iterate as quickly as in sim. Every test run involves charging batteries, walking onto the arena, recording video, etc. Bias toward *bench tests* and *dry runs* over flight tests.
+`─────────────────────────────────────────────────`
+
+---
+
+## 19. New cast of characters
+
+| Name | What it is | When you'll meet it |
+|---|---|---|
+| **Mapping Drone** | A custom build with an Intel RealSense camera, Rockchip RK35xx onboard computer, UWB tag, and PX4-based flight controller. You SSH/NoMachine into it. | All of Stage 1. |
+| **C2 Terminal** | The team's laptop. Windows host + Ubuntu 22.04 VM. Runs your strategy code. | Both stages, but actively only for Stage 2 (controlling the HULAs). |
+| **HULA drones** | 3× Highgreat HULA mini-quadcopters. Programmed via the **pyhulax** Python library over WiFi. | All of Stage 2. |
+| **Intel RealSense** | A consumer stereo depth camera. Streams synced RGB + depth + IR via the **pyrealsense2** Python library. | Mapping drone sensor. |
+| **ArUco marker** | A printed black-and-white square pattern OpenCV can detect and decode to an integer ID. | Placed beside each landing pad; you decide valid/invalid based on ID. |
+| **NPU / RKNN** | Neural Processing Unit on the Rockchip SoC. You convert YOLO weights to RKNN format and run inference at ~50fps via the **rknnlite** Python library. | Real-time detection on the mapping drone. |
+| **UWB** | Ultra-Wideband indoor positioning. Anchor stations around the arena + a tag on each drone. Gives ~10–30 cm accuracy x,y at ~10 Hz. | All positioning everywhere. |
+| **ROS2 (Humble or Jazzy)** | A robotics middleware. You'll mostly only use it to subscribe to one topic (`uwb_tag`). | Optional — you can also access UWB without ROS2. |
+| **RoboMaster ground robots** | 5× DJI RoboMaster S1-class robots driving programmatically around the arena as your "convoy targets". | Stage 2 detection targets. |
+| **NoMachine** | A remote-desktop protocol like VNC but faster. Gives you a real Linux desktop on the mapping drone over the network. | Your daily editor for mapping-drone code. |
+
+---
+
+## 20. UWB (Ultra-Wideband) — the new "GPS-indoors"
+
+In the Qualifier we had a broken simulated "VIO". In the Finals we have **real UWB positioning** with anchor stations bolted to the arena's truss.
+
+### 20.1 How UWB works in two sentences
+
+Several **anchor stations** mounted around the arena broadcast precisely-timed UWB pulses. A **tag** on each drone measures the time-of-flight to each anchor, multilaterates its x,y in the arena frame, and broadcasts the result over WiFi at ~10 Hz.
+
+**Accuracy:** ~10–30 cm in good conditions. **Refresh rate:** ~10 Hz. **Latency:** typically <100 ms.
+
+### 20.2 Coordinate frame — the swap
+
+The Finals materials and `kolomee.py` reveal a quirk: UWB outputs a `PoseStamped` ROS message where:
+
+```
+msg.pose.position.x  ←  east of arena origin
+msg.pose.position.y  ←  north of arena origin
+msg.pose.position.z  ←  up (sometimes unused)
+```
+
+But `kolomee.py` immediately stores them swapped:
+
+```python
+self.n = msg.pose.position.y    # arena-north
+self.e = msg.pose.position.x    # arena-east
+```
+
+This makes the variable names align with PX4's NED convention. **If your drone flies the wrong way, this swap is the first place to check** — different installations of the UWB system may have different axis conventions. Sanity-test it by manually walking the drone north and watching which value increases.
+
+### 20.3 Failure modes
+
+- **NLOS (Non-Line-Of-Sight):** if the tag can't see ≥3 anchors (metal box, person standing in the way), its solution becomes garbage. Don't fly through wireframe scaffolding columns.
+- **Multipath:** in a metallic indoor venue, UWB pulses bounce off walls and arrive at the tag multiple times. The receiver picks the wrong one and reports an incorrect distance. Effect: position jitters or jumps by ~1 m. Mitigation: gentle velocity gains so the drone doesn't chase the jitter.
+- **Anchor calibration:** if an anchor was bumped, all measurements through it are biased. You can't fix this; it's the venue's job. But if your drone consistently drifts a fixed direction, suspect this.
+
+`★ Insight ─────────────────────────────────────`
+- Treat UWB like a noisy GPS, not a perfect oracle. Always low-pass filter or use proportional control with modest gain (`KP=0.1` in kolomee), not bang-bang. Otherwise the drone bounces around chasing every UWB twitch.
+- UWB gives x,y, **not yaw**. The PX4 IMU still provides yaw via `attitude_euler()`. This is why kolomee.py locks `takeoff_yaw` at startup and sends it with every `VelocityNedYaw` setpoint — the drone never turns; it strafes.
+`─────────────────────────────────────────────────`
+
+---
+
+## 21. Intel RealSense via pyrealsense2
+
+The Mapping Drone's depth camera is an **Intel RealSense** (likely D435i or D455). It plugs in via USB3 and exposes synchronised colour + depth + IR streams through Intel's **pyrealsense2** Python SDK.
+
+### 21.1 The canonical pipeline pattern
+
+Every pyrealsense2 program follows the same shape:
+
+```python
+import pyrealsense2 as rs
+import numpy as np
+
+# 1. Create pipeline + config
+pipeline = rs.pipeline()
+config = rs.config()
+
+# 2. Enable the streams you want
+config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)   # 30 Hz, raw uint16
+config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+
+# 3. Start
+profile = pipeline.start(config)
+
+# 4. (Optional but recommended) get the depth scale to convert z16 → metres
+depth_scale = profile.get_device().first_depth_sensor().get_depth_scale()
+# usually 0.001 — meaning each z16 unit = 1 mm
+
+# 5. (Optional) align depth to color so the same (u,v) refers to the same pixel
+align_to_color = rs.align(rs.stream.color)
+
+try:
+    while True:
+        frames = pipeline.wait_for_frames()    # blocks until a fresh frame is ready
+        frames = align_to_color.process(frames)
+
+        depth_frame = frames.get_depth_frame()
+        color_frame = frames.get_color_frame()
+        if not depth_frame or not color_frame:
+            continue
+
+        color_image = np.asanyarray(color_frame.get_data())  # H×W×3 uint8 BGR
+        depth_image = np.asanyarray(depth_frame.get_data())  # H×W uint16 (z16)
+
+        # depth in metres for a pixel (cx, cy):
+        distance_m = depth_frame.get_distance(cx, cy)
+        # OR vectorised:
+        depth_m_array = depth_image.astype(np.float32) * depth_scale
+
+        # ... your logic ...
+
+finally:
+    pipeline.stop()
+```
+
+### 21.2 The 6 things that will bite you
+
+1. **USB3 is required.** A USB2 cable or hub silently downgrades you to 6 fps maximum. If your camera "feels slow", check `lsusb -t`.
+2. **`get_distance(u, v)` returns 0.0 for invalid depth** (too close, too far, transparent surface, specular reflection). Filter zeros.
+3. **`align()` is expensive** (~5 ms on a Rockchip). If you don't need pixel-perfect RGB↔depth correspondence, skip it.
+4. **Resolution mismatches:** depth stream max is usually 1280×720; color max varies by model. If a config call silently fails, the pipeline starts but you get no frames — check `pipeline.try_wait_for_frames(2000)`.
+5. **Holes in depth** at object boundaries are normal. The post-processing filters (`rs.spatial_filter()`, `rs.temporal_filter()`) help if you have CPU budget.
+6. **First few frames are garbage** (auto-exposure / autofocus). Discard the first 5 frames.
+
+### 21.3 Getting camera intrinsics
+
+You'll need `fx, fy, cx, cy` to back-project pixels to 3D (same as Qualifier §7). With pyrealsense2:
+
+```python
+depth_intrinsics = depth_frame.profile.as_video_stream_profile().get_intrinsics()
+fx, fy, cx, cy = depth_intrinsics.fx, depth_intrinsics.fy, depth_intrinsics.ppx, depth_intrinsics.ppy
+# Distortion coefficients are usually all zero for RealSense (factory-rectified).
+```
+
+Use the *depth* intrinsics when projecting depth pixels, and the *color* intrinsics when projecting RGB pixels (after `align()` they're the same).
+
+### 21.4 What the workshop's example files cover
+
+The PDF lists these reference scripts in `references/finalist_codes/realsense_cam/`:
+
+- `getRGB.py` — RGB only.
+- `getDepth.py` — depth, pixel distance demo.
+- `getInfra.py` — IR streams (useful if the venue is too dark for RGB YOLO).
+- `getSyncDepthColor.py` — what we showed above. **Read this first.**
+- `getDepthPointCloud.py` — depth → 3D point cloud (`rs.pointcloud()`).
+- `generateTopDown.py` — point cloud → top-down occupancy grid (Stage 1 deliverable).
+- `getDepthAndDetect.py` — same as `getSyncDepthColor.py` plus YOLO inference.
+
+Official docs: [github.com/IntelRealSense/librealsense](https://github.com/IntelRealSense/librealsense).
+
+---
+
+## 22. ArUco markers — encoding "valid landing pad" in a printed square
+
+An **ArUco marker** is a printed black-and-white square inside a thick black border. OpenCV detects it, reads the bit pattern in the centre, and returns an integer **ID**. The competition uses these to encode "valid" vs "invalid" landing zones; you decide the encoding scheme.
+
+### 22.1 The dictionary
+
+A "dictionary" is the set of all possible markers and IDs. Each comes from a tradeoff between marker complexity and resilience to misreads. The workshop's reference uses:
+
+```python
+arucoDict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
+```
+
+This means **6×6 = 36 internal bits, up to 250 possible IDs (0–249)**. Wider grids hold more IDs but need higher resolution to detect.
+
+### 22.2 The modern OpenCV detector pattern (OpenCV ≥ 4.7)
+
+```python
+import cv2
+
+arucoDict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
+parameters = cv2.aruco.DetectorParameters()
+detector  = cv2.aruco.ArucoDetector(arucoDict, parameters)
+
+# every frame:
+gray = cv2.cvtColor(color_image, cv2.COLOR_BGR2GRAY)
+corners, ids, rejected = detector.detectMarkers(gray)
+
+if ids is not None:
+    cv2.aruco.drawDetectedMarkers(color_image, corners, ids)
+    for i, marker_id in enumerate(ids.flatten()):
+        c = corners[i].reshape((4, 2))   # 4 corners in pixel coords
+        cx_pix = int(c[:, 0].mean())
+        cy_pix = int(c[:, 1].mean())
+        # Get the marker's 3D position from depth at its centre:
+        depth_m = depth_frame.get_distance(cx_pix, cy_pix)
+        if depth_m == 0:
+            continue   # depth miss; skip this detection
+        # Back-project pixel → 3D using camera intrinsics
+        X = (cx_pix - cx) * depth_m / fx
+        Y = (cy_pix - cy) * depth_m / fy
+        Z = depth_m
+```
+
+`★ Insight ─────────────────────────────────────`
+- The deprecated `cv2.aruco.estimatePoseSingleMarkers` is replaced in modern OpenCV by `cv2.solvePnP`. For our use you don't need full 6-DOF pose — just the 3D **position** of the marker centre, which you get from the depth pixel at the marker's centroid (as above). If you do need full pose, pass `flags=cv2.SOLVEPNP_IPPE_SQUARE` — the planar-square specialised solver is faster and more numerically stable than the iterative default.
+- The dictionary you read must match the dictionary printed. If you ever see `ids = None` when a marker is clearly visible, you've got the wrong dictionary.
+`─────────────────────────────────────────────────`
+
+### 22.3 Encoding "valid" vs "invalid"
+
+The Finals briefing will tell you the scheme. Common patterns teams pick:
+
+- **ID parity:** even IDs valid, odd invalid. Easy but coarse.
+- **ID range lookup:** valid IDs explicitly listed (e.g. `VALID = {7, 12, 31}`). Most flexible.
+- **Bit pattern in the ID:** e.g. lowest bit = valid flag.
+
+In your code, after detecting an ID:
+
+```python
+VALID_IDS = {7, 12, 31, 44}  # to be filled from briefing
+is_valid = int(marker_id) in VALID_IDS
+```
+
+### 22.4 Detection gotchas
+
+- **Motion blur** ruins ArUco. If the drone yaws while reading a marker, the detector silently fails. Hover steady for >0.5 s when scanning.
+- **Marker size matters.** A 10 cm marker at 3 m distance covers ~30 px at 640×480 — close to the limit. If the venue's markers are small, fly low.
+- **Lighting glare:** bright LED reflections on glossy paper hide bits. The detector returns no ID rather than a wrong one (good news), but coverage drops.
+- The `rejected` return from `detectMarkers` lists "candidate quadrilaterals that failed bit decoding" — useful to log if you're debugging "why didn't it detect this one".
+
+Official docs: [docs.opencv.org/4.x/d5/dae/tutorial_aruco_detection.html](https://docs.opencv.org/4.x/d5/dae/tutorial_aruco_detection.html).
+
+---
+
+## 23. RKNN — running YOLO on the Rockchip NPU
+
+The Mapping Drone's onboard computer is a Rockchip SoC (likely RK3588 or RK3576). These chips include a dedicated **Neural Processing Unit** that runs quantised models at ~10× the speed of CPU inference for the same wattage. The Finals PDF cites **~50 fps for YOLOv11n** via NPU vs ~5 fps for the same model on the CPU.
+
+### 23.1 The conversion pipeline
+
+You can't run a `.pt` PyTorch file directly on the NPU. You go through three formats:
+
+```
+yolov10n.pt   →   yolov10n.onnx   →   yolov10n.rknn
+   (PyTorch)        (open format)       (NPU-native)
+```
+
+Tools:
+- **PyTorch → ONNX**: `ultralytics`' built-in `model.export(format='onnx')` (the workshop's `convertyolotoonnx.py`).
+- **ONNX → RKNN**: `rknn-toolkit2` package on x86 (with quantisation dataset). Workshop's `convertrknn.py`.
+
+The conversion is **done on your desktop, not on the drone.** The drone only runs the pre-converted `.rknn` file.
+
+### 23.2 Inference at runtime via rknnlite
+
+The lightweight inference SDK is `rknnlite.api.RKNNLite`. On the drone:
+
+```python
+from rknnlite.api import RKNNLite
+
+rknn = RKNNLite()
+rknn.load_rknn("yolo11n.rknn")    # load the converted model
+rknn.init_runtime()                # allocates NPU resources
+# (optional) rknn.init_runtime(core_mask=RKNNLite.NPU_CORE_0_1_2)  # pin cores
+
+# per frame:
+outputs = rknn.inference(inputs=[img])   # img is a NumPy array, shape (1, H, W, 3) typically
+
+# Then YOU run NMS + decode yourself — rknnlite does not bundle YOLO post-processing:
+boxes, classes, scores = post_process_yolov8(outputs, ori_w, ori_h)
+```
+
+### 23.3 The thing that catches everyone: NHWC vs NCHW, normalisation, NMS
+
+- **Input layout** is **NHWC** (height-width-channels-last) for most RKNN models, not the **NCHW** PyTorch uses. The conversion script normally bakes this in — but if your inference returns garbage, this is the first thing to check.
+- **Input normalisation** is baked into the model graph at conversion time (mean/std). Don't re-divide pixels by 255 unless the model expects raw 0-255.
+- **NMS is not bundled.** The model returns raw box predictions — typically `(8400, 84)` for YOLOv8 with 80 classes. You apply confidence threshold + Non-Maximum Suppression in NumPy. The workshop's `rknndecoder.py` and `testrknn_with_display.py` show this. (See lines 18-50 of `testrknn_with_display.py`.)
+
+### 23.4 What you'll train
+
+For Stage 1 we want to detect *landing pads and ArUco markers*. Two practical strategies:
+
+- **Use ArUco detection (Section 22) directly** — no YOLO needed.
+- **Train a custom YOLO** that classifies "landing_pad" so you have redundancy when ArUco fails (poor lighting, far range). Then sanity-check the pad with ArUco.
+
+For Stage 2 we want to detect *RoboMaster ground robots*. Definitely YOLO — `roboflow.com` already has a "RoboMaster S1" dataset you can fine-tune from.
+
+Official docs: [github.com/airockchip/rknn-toolkit2](https://github.com/airockchip/rknn-toolkit2) and [github.com/airockchip/rknn_model_zoo](https://github.com/airockchip/rknn_model_zoo).
+
+---
+
+## 24. HULA swarm via pyhulax
+
+The 3 swarm drones are **Highgreat HULA** quadcopters. They're controlled from the C2 Terminal via the **pyhulax** Python library over WiFi.
+
+### 24.1 Discovery: Dola
+
+`pyhulax.dola.Dola` is a broadcast discovery service. You start it, it listens for HULA drones announcing themselves on the local WiFi, and returns a `{plane_id: ip}` dict:
+
+```python
+from pyhulax import DroneAPI
+from pyhulax.core import Direction
+from dola import Dola
+
+dola = Dola()
+dola.start()
+try:
+    drones_ips = dola.get_all_ips(listen_seconds=5)   # blocking, budget ≥5 s
+finally:
+    dola.stop()
+```
+
+### 24.2 Connecting + controlling
+
+Each drone is independently connectable. The library is *synchronous*, unlike MAVSDK:
+
+```python
+drones = {}     # ip -> DroneAPI
+streams = {}    # ip -> VideoStream
+for plane_id, ip in drones_ips.items():
+    d = DroneAPI()
+    d.connect(ip)
+    drones[ip] = d
+    v = d.create_video_stream()
+    d.set_video_stream(True)
+    v.start()
+    streams[ip] = v
+
+# Movement commands (units of distance/speed unclear without docs — likely metres):
+drones[ip].takeoff()
+drones[ip].move(Direction.FORWARD, 0.5)   # 0.5 m forward
+drones[ip].land()
+```
+
+### 24.3 Per-drone state machine
+
+The skeleton in `huladola.py` strongly hints at a per-drone state-machine pattern. Each drone needs its own state because they fly different missions in parallel:
+
+```python
+states = {ip: 0 for ip in drones}    # per-drone state
+
+while True:
+    for ip in drones:
+        d, s = drones[ip], states[ip]
+        if s == 0:
+            d.takeoff(); states[ip] = 1
+        elif s == 1:
+            d.move(Direction.FORWARD, target_distance[ip]); states[ip] = 2
+        elif s == 2:
+            d.land(); states[ip] = 3
+        # else done
+
+        # Snapshot detection on each drone's video stream
+        f = streams[ip].latest_frame
+        if f is not None:
+            img = f.to_rgb()    # numpy array
+            detect_and_log(img, drone_id=ip)
+    time.sleep(0.05)
+```
+
+### 24.4 What we don't know yet (need to verify on hardware)
+
+- **Distance/speed units** — `Direction.FORWARD, 0.5` is documented as "0.5 m"-ish but library is closed-source. Bench-test before committing to mission distances.
+- **Coordinate frame** — is `Direction.FORWARD` body-frame (relative to current yaw) or world-frame? Almost certainly body-frame, but verify.
+- **Failure semantics** — what happens if WiFi drops mid-flight? Does the drone hover or RTL?
+- **Concurrency** — can you `move()` multiple drones simultaneously without lockstep, or does the library serialise calls?
+
+Plan to spend a half-day bench-testing on a single HULA before scaling to 3.
+
+Reference for library: comment in `huladola.py` cites [pyhulax.xenops.ae](https://pyhulax.xenops.ae).
+
+`★ Insight ─────────────────────────────────────`
+- pyhulax is *synchronous* (no asyncio). This is a big difference from MAVSDK and complicates parallel control of 3 drones. The textbook fix: one Python thread per drone, each running its own state machine. Shared state (target zones, completion flags) goes through a `threading.Lock()`.
+- The Dola discovery's `listen_seconds=5` is a hard floor — budget this into your mission start time, not "0.5 s" or you'll miss drones.
+`─────────────────────────────────────────────────`
+
+---
+
+## 25. ROS2 basics (just enough)
+
+The mapping drone runs ROS2 (likely Humble or Jazzy). You only **need** ROS2 to subscribe to UWB if you use the ROS2 topic pathway. The non-ROS2 path uses a provided Python UWB class — simpler if available.
+
+### 25.1 The 5-line subscriber
+
+```python
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import PoseStamped
+from rclpy.qos import QoSProfile, ReliabilityPolicy
+
+class UwbNode(Node):
+    def __init__(self):
+        super().__init__("uwb_listener")
+        qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=10)
+        self.create_subscription(PoseStamped, "uwb_tag", self.cb, qos)
+        self.n, self.e, self.ready = 0.0, 0.0, False
+    def cb(self, msg):
+        self.n = msg.pose.position.y
+        self.e = msg.pose.position.x
+        self.ready = True
+
+rclpy.init()
+node = UwbNode()
+# run rclpy.spin in a background thread so it doesn't block asyncio:
+import threading
+threading.Thread(target=rclpy.spin, args=(node,), daemon=True).start()
+
+# now `node.n`, `node.e`, `node.ready` are live, thread-safe to read.
+```
+
+This is exactly what `kolomee.py` does in lines 50-91.
+
+### 25.2 QoS — BEST_EFFORT vs RELIABLE
+
+- **RELIABLE** is TCP-like: the publisher retransmits dropped messages. Default. Use for command/control messages.
+- **BEST_EFFORT** is UDP-like: fire-and-forget. Use for high-rate sensor streams. **UWB position should be BEST_EFFORT** — you don't want to receive a stale position because the system was retrying.
+
+If publisher and subscriber QoS don't match, **you'll silently receive nothing**. This catches everyone once.
+
+### 25.3 Debugging tools
+
+In a separate terminal on the drone:
+
+```bash
+ros2 topic list                          # what topics exist?
+ros2 topic echo /uwb_tag                 # print every message
+ros2 topic hz /uwb_tag                   # publish rate
+ros2 topic info /uwb_tag --verbose       # type + QoS
+```
+
+If `ros2 topic list` shows the topic but `echo` blocks forever → QoS mismatch.
+
+### 25.4 What you DON'T need
+
+You will **not** be writing your own ROS2 nodes that other people consume. You're only consuming one or two topics that the venue's infrastructure publishes. No need to learn launch files, packages, colcon, or RViz. Keep your code Python-script-flat, not a ROS2 package.
+
+### 25.5 Environment variables that bite
+
+- **`ROS_DOMAIN_ID`** isolates ROS2 networks. Two teams on the same WiFi with `ROS_DOMAIN_ID=0` (default) will see each other's topics. The venue should set a per-team domain ID; export it in every shell you open.
+- **`RMW_IMPLEMENTATION`** picks the DDS implementation. ROS2 Humble defaults to FastDDS; CycloneDDS is a drop-in alternative with better introspection (`ros2 topic info -v` shows accurate QoS under Cyclone, often `UNKNOWN` under FastDDS). Set consistently across **every** terminal — mixed implementations on the same `ROS_DOMAIN_ID` don't talk:
+
+  ```bash
+  export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+  ```
+
+Official docs: [docs.ros.org/en/jazzy/](https://docs.ros.org/en/jazzy/).
+
+---
+
+## 26. The Finals control loop — putting it all together
+
+Same structure as Qualifier (§13), but with different boxes:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                       BACKGROUND TASKS                       │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │
+│  │ MAVSDK pos   │  │ RealSense    │  │ ROS2 UWB sub     │  │
+│  │ telemetry    │  │ pipeline.    │  │ (rclpy.spin in   │  │
+│  │ (yaw, alt)   │  │ wait_for_    │  │  daemon thread)  │  │
+│  │              │  │ frames in    │  │                  │  │
+│  │              │  │ worker       │  │                  │  │
+│  └──────┬───────┘  └──────┬───────┘  └────────┬─────────┘  │
+└─────────┼─────────────────┼───────────────────┼────────────┘
+          ▼                 ▼                   ▼
+    ┌────────────────────────────────────────────────────┐
+    │              MAIN MISSION LOOP (10 Hz)              │
+    │                                                     │
+    │  1. uwb_n, uwb_e = get_uwb_position()              │
+    │  2. yaw, alt     = get_attitude(), get_height()    │
+    │  3. depth, color = pipeline.wait_for_frames()      │
+    │  4. ids, corners = aruco.detectMarkers(color)      │
+    │     → record marker_id + (x,y) in arena            │
+    │     → top_down_grid.mark(occupied, distance)       │
+    │  5. err = target_xy - (uwb_n, uwb_e)               │
+    │  6. (vn, ve) = clamp(KP_XY * err, MAX_VEL_XY)      │
+    │  7. set_velocity_ned(vn, ve, vd, locked_yaw)       │
+    │  8. sleep 100 ms                                   │
+    │                                                     │
+    │  every N frames: rknn.inference(color) for         │
+    │  RoboMaster detection (Stage 2)                    │
+    └─────────────────────────────────────────────────────┘
+```
+
+Differences vs Qualifier:
+- **Position source is UWB, not EKF.** Reliable and absolute.
+- **Camera frames come from pyrealsense2, not gz-transport.** You actively pull frames, no callback.
+- **Inference target hardware is the NPU, not CPU.** You batch differently and post-process manually.
+- **Yaw is locked at takeoff.** Body frame and world frame stay aligned for the mission. The drone strafes; it does not turn.
+
+---
+
+## 27. Updated minimum viable competition entry
+
+Same triage logic as Qualifier §15. Order of attack:
+
+1. **NoMachine into mapping drone successfully.** (Phase 0; nothing else works without this.)
+2. **Read UWB once and print it.** Confirms the venue's positioning system is live.
+3. **Take off, hover for 5 s, land — using `kolomee.py` as-is.** Trust the reference.
+4. **One-waypoint flight using UWB feedback.** Replace kolomee's hardcoded waypoints with `current + 1 m north`.
+5. **RealSense frame capture + display.** Prove the camera works on the drone.
+6. **Detect one ArUco marker on a printed sheet from the bench.** Confirm dictionary + camera.
+7. **Stage 1 minimal path: fly a 3-waypoint lawnmower over the arena, log every ArUco ID + position.**
+8. **Top-down depth map writer.** Save the deliverable Stage 1 wants.
+9. **HULA discovery + single takeoff/land from C2.** Switch context to Stage 2.
+10. **All three HULAs to predetermined landing pads.**
+11. **RoboMaster detection** with the RKNN-converted YOLO.
+
+Levels 1-5 are realistic in 2 days. Levels 6-8 are a third day. Levels 9-11 are full integration; reserve a half-week.
+
+---
+
+## 28. Updated glossary additions
+
+- **ArUco marker**: a printed black-and-white square encoding an integer ID, detectable by `cv2.aruco`.
+- **C2 Terminal**: the team's laptop (Windows + Ubuntu VM) running strategy code for Stage 2.
+- **Dola**: broadcast discovery protocol for finding HULA drones on the WiFi.
+- **HULA**: Highgreat HULA mini-quadcopter; the Stage-2 swarm drones.
+- **kolomee.py**: the workshop's reference UWB-based navigation skeleton.
+- **Mapping Drone**: the single Stage-1 drone with RealSense + NPU + UWB tag.
+- **NoMachine**: a remote-desktop tool used to access the mapping drone's Linux box.
+- **NPU**: Neural Processing Unit; the Rockchip SoC's hardware accelerator for YOLO.
+- **pyhulax**: closed-source Python library to control HULA drones from C2.
+- **pyrealsense2**: Intel's Python SDK for RealSense cameras.
+- **QoS profile**: ROS2's reliability/durability/depth settings; UWB topics typically BEST_EFFORT.
+- **RealSense**: Intel's consumer RGB-D camera family (D435i / D455 etc.).
+- **RKNN**: Rockchip Neural Network — file format + runtime for NPU inference.
+- **rknnlite**: the lightweight inference Python library used on the drone.
+- **rknn-toolkit2**: the desktop conversion toolkit (ONNX → RKNN).
+- **RoboMaster ground robots**: 5× ground robots Stage 2 detects.
+- **Stage 1**: Reconnaissance (University-only). Mapping + ArUco identification.
+- **Stage 2**: Deployment & Ambush. HULA swarm landing + convoy detection.
+- **UWB**: Ultra-Wideband; the indoor positioning system replacing GPS.
+- **UWB tag**: the small UWB transceiver mounted on the drone.
+
+---
+
+## 29. What to read next, in order
+
+1. This document, Part 2 (you just did).
+2. **`materials/RoboVerse 2026 Finals.pdf`** — re-read with new vocabulary.
+3. **`references/finalist_codes/uwb_mavsdk/kolomee.py`** — line-by-line with `docs/kolomee_dissection.md` next to you.
+4. **`references/finalist_codes/realsense_cam/getSyncDepthColor.py`** — RealSense pipeline pattern.
+5. **`references/finalist_codes/aruco_detection/aruco_detection.py`** — ArUco snippet.
+6. **`references/finalist_codes/rknn_detect/testrknn_with_display.py`** — end-to-end YOLO via NPU.
+7. **`references/finalist_codes/hula_swarm/huladola.py`** — swarm discovery + per-drone control.
+
+Then start working through `RUNBOOK.md` Phase 7 (Finals onwards).
+
+*End of Part 2.*
+
