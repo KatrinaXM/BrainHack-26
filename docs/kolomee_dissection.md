@@ -581,10 +581,10 @@ We brought up `sim_uwb_bridge.py` + Qualifier Gazebo SITL + an adapted `codes/fi
 **What's still blocked in SITL (not in scope to fix):**
 
 - PX4's EKF on the Qualifier Gazebo airframe diverges in altitude (D=-0.76 → -28.82 → +446m within 60-90s). This is the same `gz-sim-odometry-publisher`-feeds-noisy-VIO issue documented in the `experiment/ekf-tuning` branch. The kolomee outer loop (UWB-driven) is unaffected, but PX4's inner velocity controller uses EKF state and starts commanding nonsense attitudes.
-- The Qualifier-era `px4-patches/4005_gz_x500_vision.tuned` may help; not applied this session.
+- **The Qualifier-era `px4-patches/4005_gz_x500_vision.tuned` was tried and made things *worse*** (drone drifted to N=-52, E=+37, D=+501m vs. baseline N=-1.09, E=+0.62, D=+446m). The patch's tighter EV-noise + wider gates were tuned for the Qualifier `mission.py` body-frame-velocity pattern; they actively destabilize kolomee's world-frame `set_velocity_ned` + `vd=0` pattern. Patch reverted after one run.
 - Real Finals hardware uses RealSense T265-style VIO with different EKF tuning — Qualifier patches don't transfer directly.
 
-**Practical takeaway:** the bridge + kolomee data path is verified. Use SITL for *data-flow* tests (mission logic, UWB ingestion, MAVSDK plumbing, waypoint sequencing) — but expect mission completion to require either patched EKF gates or real hardware.
+**Practical takeaway:** the bridge + kolomee data path is verified. Use SITL for *data-flow* tests (mission logic, UWB ingestion, MAVSDK plumbing, waypoint sequencing) — but mission completion in SITL is **not viable on this VM** without significant EKF work, and that work is wasted relative to Finals hardware. Spend bench time on RealSense/ArUco/pyhulax mocks instead.
 
 ---
 
