@@ -49,15 +49,43 @@ from typing import Optional
 
 # pyhulax may not be installed on the dev VM — guard the imports so this
 # file is at least parseable / importable everywhere.
+#
+# Set BH26_MOCK=1 to use the offline test mock at codes/finals/mocks/pyhulax_mock.py
+# (synthetic drones + synthetic video with periodic "RoboMaster" patches).
 PYHULAX_AVAILABLE = False
-try:
-    from pyhulax import DroneAPI            # type: ignore[import-untyped]
-    from pyhulax.core import Direction      # type: ignore[import-untyped]
-    from pyhulax.video import VideoStream   # type: ignore[import-untyped]
-    from dola import Dola                   # type: ignore[import-untyped]
+PYHULAX_BACKEND = "none"
+
+if os.environ.get("BH26_MOCK") == "1":
+    # Insert codes/finals/ on sys.path so `from mocks.pyhulax_mock import ...`
+    # works regardless of CWD.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from mocks.pyhulax_mock import (    # type: ignore[import-not-found]
+        DroneAPI, Direction, VideoStream, Dola,
+    )
     PYHULAX_AVAILABLE = True
+    PYHULAX_BACKEND = "mock"
+else:
+    try:
+        from pyhulax import DroneAPI            # type: ignore[import-untyped]
+        from pyhulax.core import Direction      # type: ignore[import-untyped]
+        from pyhulax.video import VideoStream   # type: ignore[import-untyped]
+        from dola import Dola                   # type: ignore[import-untyped]
+        PYHULAX_AVAILABLE = True
+        PYHULAX_BACKEND = "pyhulax"
+    except ImportError:
+        DroneAPI = Direction = VideoStream = Dola = None  # type: ignore[assignment]
+
+# cv2 is optional at module-import time — only required if we actually
+# enter ambush_watch with a video frame. Keeps the module importable on
+# stripped-down environments and the unit tests fast.
+try:
+    import cv2     # type: ignore[import-untyped]
+    import numpy as np
+    CV2_AVAILABLE = True
 except ImportError:
-    DroneAPI = Direction = VideoStream = Dola = None  # type: ignore[assignment]
+    cv2 = None  # type: ignore[assignment]
+    np = None   # type: ignore[assignment]
+    CV2_AVAILABLE = False
 
 
 # ============================================================================
@@ -142,6 +170,7 @@ class DroneMission:
     state: DroneState = DroneState.IDLE
     state_entered_at: float = 0.0
     snapshots_saved: int = 0
+    last_snapshot_at: float = 0.0
     last_error: str = ""
 
     def transition(self, new: DroneState) -> None:
@@ -250,33 +279,88 @@ def ambush_tick(m: DroneMission) -> None:
         save_snapshot(frame, m, bboxes)
 
 
+# Detector tunables (env-overridable for calibration day at the venue).
+DETECT_MIN_AREA_PX  = int(os.environ.get("BH26_DETECT_MIN_AREA",  "400"))
+DETECT_MAX_AREA_PX  = int(os.environ.get("BH26_DETECT_MAX_AREA",  "60000"))
+DETECT_MIN_ASPECT   = float(os.environ.get("BH26_DETECT_MIN_ASPECT", "0.3"))
+DETECT_MAX_ASPECT   = float(os.environ.get("BH26_DETECT_MAX_ASPECT", "3.0"))
+
+
 def detect_robomaster(frame) -> tuple[bool, list]:
-    """Return (detected, bboxes). Skeleton returns False.
+    """Return (detected, bboxes). Colour-based RoboMaster armour-plate detector.
 
-    Real impl options (pick one and unit-test against stock RoboMaster
-    images before competition):
+    HSV thresholding for red (RoboMaster armour plates are red/blue
+    backlit panels). Two hue ranges because red wraps the hue cylinder.
+    Filters contours by area + aspect ratio to reject noise.
 
-      1. YOLOv8 fine-tuned on RoboMaster images. ~5 MB model. Repurpose
-         the Qualifier `barrel_yolo.pt` training pipeline.
-      2. Colour-segment red/blue armour plates, contour-check shape.
-         Faster, no model file, but fails under poor lighting.
-      3. ArUco markers attached to RoboMasters (if rules allow it — check
-         with organisers; PDF doesn't specify).
+    Tunable via BH26_DETECT_* env vars — calibrate on real footage at
+    the venue. For competition day, also consider replacing this with
+    a YOLOv8 model (Qualifier-trained pipeline can be reused), but the
+    colour approach has no model file to manage.
     """
-    return (False, [])
+    if not CV2_AVAILABLE or frame is None:
+        return (False, [])
+
+    hsv = cv2.cvtColor(frame, cv2.COLOR_RGB2HSV)
+    # Red wraps around H=0; two windows to capture both sides.
+    mask1 = cv2.inRange(hsv, (0,   120, 60), (10,  255, 255))
+    mask2 = cv2.inRange(hsv, (170, 120, 60), (180, 255, 255))
+    mask = cv2.bitwise_or(mask1, mask2)
+    # Light cleanup so single-pixel speckles don't pass the area filter.
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,
+                            cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
+    bboxes: list[dict] = []
+    for c in contours:
+        area = float(cv2.contourArea(c))
+        if area < DETECT_MIN_AREA_PX or area > DETECT_MAX_AREA_PX:
+            continue
+        x, y, w, h = cv2.boundingRect(c)
+        if h == 0:
+            continue
+        aspect = w / float(h)
+        if aspect < DETECT_MIN_ASPECT or aspect > DETECT_MAX_ASPECT:
+            continue
+        bboxes.append({
+            "x": int(x), "y": int(y), "w": int(w), "h": int(h),
+            "area": area, "aspect": round(aspect, 3),
+        })
+    return (len(bboxes) > 0, bboxes)
+
+
+# How long after the last snapshot before we'll save another one.
+# Prevents "100 snapshots of the same robot in 2 seconds" floods while
+# still letting different robot appearances through.
+SNAPSHOT_COOLDOWN_S = float(os.environ.get("BH26_SNAPSHOT_COOLDOWN_S", "2.0"))
 
 
 def save_snapshot(frame, m: DroneMission, bboxes: list) -> None:
     """Persist the detected frame + bbox metadata to OUTPUT_DIR.
 
-    TODO: add `cv2.imwrite()` call. Skipped here to keep the skeleton
-    cv2-dependency-free until the detector is wired up.
+    Writes both an annotated JPEG and a JSON sidecar (one per snapshot).
+    Cooldown-throttled to avoid flooding when a robot lingers in frame.
     """
+    now = time.time()
+    if now - m.last_snapshot_at < SNAPSHOT_COOLDOWN_S:
+        return
+
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     m.snapshots_saved += 1
-    ts = int(time.time() * 1000)
+    m.last_snapshot_at = now
+    ts = int(now * 1000)
     stem = OUTPUT_DIR / f"{m.plane_id}_{m.snapshots_saved:03d}_{ts}"
-    # cv2.imwrite(str(stem) + ".jpg", cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+
+    if CV2_AVAILABLE:
+        bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        # Draw bboxes in green so reviewers can see what triggered the save.
+        for b in bboxes:
+            cv2.rectangle(bgr, (b["x"], b["y"]),
+                          (b["x"] + b["w"], b["y"] + b["h"]),
+                          (0, 255, 0), 2)
+        cv2.imwrite(str(stem) + ".jpg", bgr)
+
     with open(str(stem) + ".json", "w") as f:
         json.dump({
             "plane_id": m.plane_id,
@@ -285,7 +369,8 @@ def save_snapshot(frame, m: DroneMission, bboxes: list) -> None:
             "ts_ms": ts,
             "bboxes": bboxes,
         }, f, indent=2)
-    print(f"[{m.plane_id}] snapshot {m.snapshots_saved} -> {stem}.jpg")
+    print(f"[{m.plane_id}] snapshot {m.snapshots_saved} -> {stem}.jpg "
+          f"({len(bboxes)} bbox)")
 
 
 # ============================================================================
@@ -344,6 +429,9 @@ def main() -> int:
 
     if not args.pads:
         sys.exit("--pads (or BH26_PAD_FILE env var) is required")
+
+    print(f"[main] backend={PYHULAX_BACKEND} cv2={'yes' if CV2_AVAILABLE else 'no'} "
+          f"output_dir={OUTPUT_DIR} ambush_window_s={AMBUSH_WINDOW_S}")
 
     # 1. Load + select landing zones
     pads = load_pads(Path(args.pads))
