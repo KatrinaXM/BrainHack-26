@@ -1,293 +1,178 @@
-# Handover — Finals prep mid-session
+# Handover — Finals prep, Pre-U scope
 
-**Date:** 2026-06-07
-**Context:** BrainHack-26 made it through Qualifiers; team is now prepping for Finals. This document is the **resume-point** for a fresh agent so they can continue without re-reading the whole repo or prior chat history.
+**Date:** 2026-06-08
+**Context:** BrainHack-26 made it through the Qualifier and is now prepping for the Finals. **Team is in the Pre-University category, which does Challenge 2 only** (HULA swarm landing + ambush). Challenge 1 (Mapping Drone + UWB nav) is University-only.
 
-If you are a new agent picking this up: read this top to bottom (~10 min) before anything else.
-
----
-
-## 1. Where we are in one paragraph
-
-The team passed the Qualifier (1st-place-tier 5 validated detections in our last test run, full mission code wired and committed on `main`). The Finals competition is **real hardware, not Gazebo SITL** — different mission, different sensors, different libraries. We've spent the post-qualifier time on (a) documenting the Finals' vocabulary in `TUTORIAL.md` Part 2, (b) drafting a phased prep plan in `RUNBOOK.md` Part 2, (c) dissecting the workshop's reference UWB navigation script in `docs/kolomee_dissection.md`, and (d) building the first piece of integration infrastructure — a "fake UWB" bridge (`codes/sim_uwb_bridge.py`) that turns the existing Qualifier Gazebo sim into a Finals testing rig.
-
-Net status: **infrastructure laid, no Finals code tested end-to-end yet.** The next coherent step is to verify the bridge against a running Gazebo sim, then adapt `kolomee.py` to use it.
+If you are a new agent picking this up: read this top to bottom (~10 min) before anything else. The bottom-line story is in §1; the actionable list is in §6.
 
 ---
 
-## 2. The Finals competition, in 30 seconds
+## 1. One-paragraph status
 
-Two-stage real-hardware drone mission. See `materials/RoboVerse 2026 Finals.pdf` for the official rules.
-
-- **Stage 1 (University teams only — Reconnaissance):** fly a single **Mapping Drone** (Intel RealSense stereo + Rockchip NPU + UWB tag) over an arena. Detect **ArUco markers** beside each landing pad. Produce a top-down depth map + valid/invalid landing-zone list.
-- **Stage 2 (Deployment & Ambush):** based on Stage 1 results, launch 3× **Highgreat HULA** swarm drones from the C2 Terminal via the `pyhulax` library. They must land accurately on 3 chosen pads. Then 5× **RoboMaster ground robots** enter as a "convoy"; the HULAs detect and snapshot them.
-
-The Mapping Drone uses **UWB anchors** for positioning (real position, no broken EKF problem we had in Qualifier). The reference navigation skeleton is `references/finalist_codes/uwb_mavsdk/kolomee.py` — fully dissected in `docs/kolomee_dissection.md`.
+The Pre-U Stage 2 software stack is **end-to-end testable on the dev VM**. The orchestrator (`codes/finals/stage2_mission.py`), a thread-per-drone state machine, runs cleanly against a faithful pyhulax mock (`codes/finals/mocks/pyhulax_mock.py`). The HSV color-based RoboMaster detector fires on synthetic frames and saves annotated JPEGs + JSON sidecars. The launcher (`run_stage2.sh`) and a 16-test unit suite (`tests/test_stage2.py`) cover the happy path and edge cases. The bridge + kolomee SITL work from earlier in the session is **not on the Pre-U critical path** (it was useful learning + remains as reference; the EKF drift documented in `docs/kolomee_dissection.md §11` is unfixable on this VM for kolomee-style velocity nav). Remaining work is mostly hardware-gated: pyhulax navigation API confirmation, RoboMaster detector calibration against real footage, and one venue session.
 
 ---
 
-## 3. Repo state — read this carefully
+## 2. Pre-U Finals competition, in 30 seconds
 
-### 3.1 Current branch
+Per `materials/RoboVerse 2026 Finals.pdf`, Challenge Two:
 
-`prep/finals` (formerly `experiment/ekf-tuning`, renamed to reflect what's actually on it).
+1. Organizers publish a landing-zone map (valid/invalid flags). **No Mapping Drone needed by Pre-U.**
+2. We pick 3 valid zones, launch 3× Highgreat HULA drones from a C2 laptop running pyhulax.
+3. HULAs land accurately on the chosen pads.
+4. 5× RoboMaster ground robots enter the cage as a "convoy"; HULAs detect + snapshot them with their onboard cameras.
 
-Local branches:
+Scored on landing accuracy + time, then snapshot count + accuracy + time. Prize structure identical to University category.
+
+---
+
+## 3. Repo state
+
+### 3.1 Branch
+
+`prep/finals`, currently **4 commits ahead of origin** (push needs your terminal — no SSH/PAT/gh in this shell):
+
 ```
-* prep/finals                        (HEAD — Finals docs + bridge)
-  experiment/wall-follow-reactive    (qualifier wallfollow experiment)
-  experiment/high-altitude-survey    (qualifier high-alt experiment)
-  main                               (Qualifier final, pushed; same as origin/main)
-```
-
-Recent commits on `prep/finals`:
-```
+dbd8942 stage2: pyhulax mock + colour-based detector + cv2 snapshot writer
+883d25b stage2: pre-u finals orchestrator skeleton
+e5745fb docs: EKF patch tried for kolomee SITL, made things worse — reverted
+437fdb6 finals integration: verify sim_uwb_bridge end-to-end against kolomee_sitl
+0d9a1ac finals prep: sim UWB bridge + handover doc; drop stale qualifier handover
 7322371 docs: extend TUTORIAL + RUNBOOK for Finals; dissect kolomee.py
-249a729 ekf-tuning: airframe param patch + drift measurement tool   ← stale, see §3.3
-c752a01 update: files and references for finals                      ← from team via origin/main pull
-43386aa launcher: interactive strategy picker                        ← qualifier
 ```
 
-There are uncommitted changes on `prep/finals`: `codes/sim_uwb_bridge.py` (new, compiles) and the deleted `HANDOVER_DEPTH.md` (stale, see §6). **Commit these together with this handover before stopping.**
+### 3.2 Pre-U Stage 2 files (the active stack)
 
-### 3.2 What lives where
+| Path | Status |
+|---|---|
+| `codes/finals/stage2_mission.py` | Orchestrator. Threaded per-drone state machine. `navigate_to_pad` implemented with documented body-frame axis convention (env-overridable for venue calibration). HSV RoboMaster detector with area + aspect filters. cv2 snapshot writer with cooldown. |
+| `codes/finals/mocks/pyhulax_mock.py` | Faithful pyhulax + dola mock. `DroneAPI` enforces a strict state machine; `VideoStream` injects red RoboMaster patches at tunable intervals; `Dola.get_all_ips` returns `BH26_MOCK_DRONES` drones. |
+| `codes/finals/tests/test_stage2.py` | 16 unit tests — all green in <1 s. Covers pad parsing, validity filtering, detector positive/negative + speckle + aspect rejection, snapshot JPEG + JSON + cooldown, navigate_to_pad direction sequences for all four quadrants + zero-axis + sub-epsilon, mock state-machine invariants. |
+| `codes/finals/run_stage2.sh` | Launcher. `--mock` (default) / `--real`, `--pads PATH`, `--ambush S`, `--robos N`, `--short` (fast smoke). |
+| `codes/finals/pads_example.json` | 6-pad example with 3 valid + 3 invalid. |
 
-| Path | Purpose | Status |
+### 3.3 Reference / earlier-session artefacts (kept, not on critical path)
+
+| Path | Why kept |
+|---|---|
+| `codes/sim_uwb_bridge.py` | Gazebo ground-truth → ROS2 `/uwb_tag` bridge with noise model. Working. Useful general async + ROS2 reference. Not used for Pre-U. |
+| `codes/finals/kolomee_sitl.py` | SITL-adapted kolomee with 5 documented bugs fixed. Works end-to-end up to PX4 EKF drift (sim-side, unfixable on this VM). Useful pattern reference. Not used for Pre-U. |
+| `docs/kolomee_dissection.md` | Full dissection of the workshop's UWB nav script. §5.4 bug table + §11 SITL verification log are the load-bearing parts. |
+| `codes/mission.py`, `barrel_tracker.py`, etc. | Qualifier mission. Still works in Gazebo. |
+| `px4-patches/`, `sdf-patches/`, `codes/measure_drift.py` | Qualifier EKF tuning. Stale for Finals real hardware. |
+
+### 3.4 What's missing for Pre-U end-to-end
+
+| Missing | Hardware-gated? | Estimated effort |
 |---|---|---|
-| `README.md` | Top-level orientation, points at Tutorial/Runbook/docs | Updated this session |
-| `TUTORIAL.md` Part 1 (Ch 1-17) | Qualifier concepts (NED, MAVSDK, async, intrinsics, YOLO basics) | Still relevant for Finals |
-| `TUTORIAL.md` Part 2 (Ch 18-29) | Finals: UWB, RealSense, ArUco, RKNN, pyhulax, ROS2, control loop, glossary | New this session |
-| `RUNBOOK.md` Part 1 (Phases 0-6) | Qualifier execution gates | Historical (done) |
-| `RUNBOOK.md` Part 2 (Phases 7-15) | Finals execution gates: prep, NoMachine, kolomee, ArUco, RKNN, Stage 1, Stage 2 | New this session |
-| `docs/kolomee_dissection.md` | Line-by-line dissection of the workshop's UWB reference script | New this session |
-| `codes/sim_uwb_bridge.py` | Gazebo ground-truth → ROS2 `/uwb_tag` bridge with toggleable noise | New this session, compiles, **untested** |
-| `codes/mission.py`, `mission_config.py`, `barrel_tracker.py`, etc. | Qualifier mission code (wallfollow strategy) | Still works; useful as Gazebo bench |
-| `codes/measure_drift.py` | EKF-drift measurement tool (Qualifier EKF tuning) | Stale (Qualifier-only) |
-| `codes/run_competition.sh`, `install.sh` | Qualifier launchers | Still work; need Finals analogues |
-| `scripts/start_sim.sh`, `stop_sim.sh`, `set_ekf_origin.py` | Gazebo sim helpers | Still work |
-| `px4-patches/` | Qualifier EKF airframe tuning | Stale (Qualifier sim only — Finals uses real hardware) |
-| `sdf-patches/OakD-Lite.model.sdf` | Qualifier camera model patch | Stale (Qualifier sim only) |
-| `references/qualifier_codes/` | Workshop's Qualifier code | Reference, untouched |
-| `references/finalist_codes/` | Workshop's Finals code: uwb_mavsdk, realsense_cam, aruco_detection, rknn_detect, hula_swarm, model_convert | Reference, untouched. The Finals starting point. |
-| `materials/RoboVerse 2026 Finals.pdf` | Official Finals rules | New this session via origin/main pull |
-| `materials/RoboVerse 2026 Qualifier.pdf` | Qualifier rules (historical) | Reference |
-| `materials/LearningMaterial*.pdf`, `Supplementary*.pdf` | Workshop slide decks | Reference |
+| pyhulax navigation API confirmation (.goto vs body-frame .move) | **Yes** | 30 minutes of bench time |
+| RoboMaster detector calibration on real footage | **Yes** (footage) | 30 min |
+| One venue integration session: network multicast for Dola, takeoff convention, landing accuracy | **Yes** | ~2 h |
 
-### 3.3 Stale files (do not delete unless asked)
+**Software-only work remaining: zero non-trivial items.** The codebase is at a clean "ready for hardware day" checkpoint.
 
-- `codes/measure_drift.py` — Qualifier EKF debugging tool. Irrelevant to Finals real hardware. Kept because the gz/rclpy pattern was useful and similar code lives in `sim_uwb_bridge.py`.
-- `px4-patches/` — Qualifier EKF tuning. Real hardware uses real VIO; these params don't apply.
-- `sdf-patches/` — Qualifier sim only.
-- The branch name `prep/finals` formerly was `experiment/ekf-tuning`; the EKF tuning files (`px4-patches/`, `codes/measure_drift.py`) are the historical reason for the original name. Now we're using the branch for general Finals prep.
+---
 
-### 3.4 Things that are genuinely missing
+## 4. How to run things
 
-| Missing | Why it matters | Next-agent action |
+### 4.1 Mock end-to-end (no hardware needed)
+
+```bash
+cd ~/BrainHack-26/codes/finals
+./run_stage2.sh --short --output /tmp/bh26_snapshots
+ls /tmp/bh26_snapshots
+```
+
+Expect: 3 drones complete their lifecycle in ~25 s, 9-12 snapshots saved (3 per drone, depending on robomaster spawn timing).
+
+### 4.2 Unit tests
+
+```bash
+cd ~/BrainHack-26/codes/finals
+python3 -m unittest tests.test_stage2 -v
+```
+
+Expect: `Ran 16 tests in <1s`, `OK`.
+
+### 4.3 Real hardware day
+
+```bash
+cd ~/BrainHack-26/codes/finals
+./run_stage2.sh --real --pads <organizers' pad file>
+```
+
+The script will refuse to run if `pyhulax` / `dola` aren't importable. Install per pyhulax.xenops.ae docs first.
+
+### 4.4 Calibration env vars (use these at the venue)
+
+| Env var | Default | What to flip if calibration shows it's off |
 |---|---|---|
-| Tested `sim_uwb_bridge.py` | We don't know if it actually publishes to a `kolomee.py` subscriber | Run it against a Gazebo sim — see §5 |
-| `kolomee.py` SITL-adapted | The reference uses `serial://`; for sim we'd need `udp://` | Make a copy, swap connection string |
-| `stage1_mission.py` | Stage 1 mission orchestrator | Sketch is in `docs/kolomee_dissection.md` §10 |
-| RealSense pipeline integration | Needed for ArUco + top-down map | Adapt `references/finalist_codes/realsense_cam/getSyncDepthColor.py` |
-| ArUco logger module | Stage 1 deliverable | Use `references/finalist_codes/aruco_detection/aruco_detection.py` |
-| pyhulax mock | Stage 2 testing without HULAs | Stub the API surface |
+| `BH26_AXIS_FORWARD` | `+x` | If Direction.FORWARD sends drone arena-east, set to `+y` (etc) |
+| `BH26_AXIS_RIGHT`   | `+y` | Same, for Direction.RIGHT |
+| `BH26_TAKEOFF_ALT_M` | `1.0` | Whatever altitude HULAs hover at after `.takeoff()` |
+| `BH26_DETECT_MIN_AREA`, `_MAX_AREA`, `_MIN_ASPECT`, `_MAX_ASPECT` | sane defaults | Tune to real RoboMaster armor plate size at flight distance |
+| `BH26_AMBUSH_S` | 120 | Length of ambush-watch window |
+| `BH26_SNAPSHOT_COOLDOWN_S` | 2.0 | Min seconds between snapshots of the same scene |
 
 ---
 
-## 4. The `sim_uwb_bridge.py` design — read before testing
+## 5. Open questions for hardware day
 
-**File:** `codes/sim_uwb_bridge.py`. Compiles. Not yet run end-to-end.
+The skeleton documents each clearly with TODO comments; for context:
 
-### 4.1 What it does
-
-1. Subscribes to Gazebo's `/model/<drone>_0/pose` (Pose_V message via `gz.transport13`).
-2. Optionally applies noise (Gaussian σ, dropout, NLOS spikes).
-3. Re-publishes as `geometry_msgs/PoseStamped` on `/uwb_tag` via `rclpy` at ~10 Hz.
-
-This makes the existing Qualifier Gazebo sim a usable testbed for kolomee-style UWB navigation. **Real fake-UWB design rationale** is in the commit message + research-agent transcript (see git log).
-
-### 4.2 Env-var configuration
-
-| Var | Default | Meaning |
-|---|---|---|
-| `BH26_UWB_NOISE` | `0` | `0` = perfect, `1` = realistic LOS (σ_xy=10cm, σ_z=15cm, 5% drop), `2` = torture (σ_xy=25cm, σ_z=40cm, bias, 15% drop, NLOS spikes) |
-| `BH26_UWB_SEED` | `0` (system entropy) | Set non-zero for reproducible noise sequences. Vital for debugging brittle controllers. |
-| `BH26_UWB_DRONE` | `x500_vision` | Gazebo model name. Automatically appends `_0` if absent. |
-| `BH26_UWB_HZ` | `10.0` | Publish rate, matching real UWB infrastructure. |
-
-### 4.3 Coordinate convention — the trap
-
-`sim_uwb_bridge.py` mirrors the **real venue's UWB convention** so that `kolomee.py` works against it unchanged:
-
-- Gazebo world pose: `pose.x = north`, `pose.y = east`, `pose.z = up`.
-- Bridge publishes: `msg.pose.position.x = east  ←  Gazebo y`, `msg.pose.position.y = north ←  Gazebo x`.
-- `kolomee.py` reads: `self.n = msg.pose.position.y` (north), `self.e = msg.pose.position.x` (east). See `kolomee.py:67-68`.
-
-If the bridge or kolomee shows the drone flying in a wrong direction during integration: **the swap is the first place to check**. Real venues may use different conventions — sanity-test by physically (or in sim) moving the drone north and watching which value increases.
-
-### 4.4 Known gotcha
-
-The bridge expects ROS2 (`rclpy`) to be importable. On the dev VM, that's only true if ROS2 was installed. The Qualifier sim didn't need ROS2 at all. **First time the next agent runs this**, expect possibly:
-```
-ModuleNotFoundError: No module named 'rclpy'
-```
-Fix: install ROS2 Humble or Jazzy on the dev VM (see `https://docs.ros.org/en/humble/Installation/Ubuntu-Install-Debs.html`) and `source /opt/ros/humble/setup.bash` before running the bridge.
-
-If ROS2 isn't desired on the dev VM, alternative: use the non-ROS2 UWB path — the Finals materials promise a "provided Python UWB class" that bypasses ROS2. That class isn't in our hands yet (organiser will provide). The bridge would then need a different output mechanism (named pipe / socket / shared memory) — but that's premature engineering for now.
+1. **Does pyhulax expose `.goto(x, y, z)` or similar absolute-position API?** If yes, prefer it over the body-frame decomposition in `navigate_to_pad` — drift across multiple sequential moves becomes a non-issue. Check `pyhulax.xenops.ae`.
+2. **Is `Direction.FORWARD` body-frame or world-frame?** Almost certainly body. If body, our assumption that all HULAs face the same direction at takeoff (because they launch from the same C2 pad) needs a quick sanity check.
+3. **Unit of `.move(direction, distance)` second arg?** `huladola.py` comment claims metres; verify with a tape measure for the first move.
+4. **Does Dola multicast work on the venue Wi-Fi?** Some managed networks block client-to-client multicast. Test discovery on day 1.
+5. **Are RoboMasters all red, all blue, or mixed?** The HSV ranges in the detector currently only catch red. If blue is needed, add a second mask.
 
 ---
 
-## 5. How to verify the bridge (next-agent first task)
+## 6. Shortest path forward (next session)
 
-This is the **highest-leverage 60-minute task** for the next session.
+Don't pile on more software — the codebase is in a clean checkpoint. The right next move depends on whether you have hardware time:
 
-### Step 1: Ensure ROS2 is available
+**If you have hardware time soon:**
+1. Run `./run_stage2.sh --short --output /tmp/smoke` to confirm everything still works locally.
+2. Push the 4 unpushed commits from your terminal.
+3. At the venue: run the script with `--real`, calibrate the axis convention + detector thresholds via the env vars in §4.4.
 
-```bash
-python3 -c "import rclpy; print(rclpy.__version__)"
-# If ModuleNotFoundError: install ROS2 Humble (Ubuntu 22.04) per the docs link in §4.4.
-```
+**If hardware time isn't scheduled yet:**
+1. **Ask the organizers for any pre-competition hardware time, even 60-90 min** — it unblocks 60% of the open questions in §5.
+2. While waiting, polish: collect stock RoboMaster images and pre-calibrate `BH26_DETECT_*` thresholds; write a `RUNBOOK.md` Phase 7 entry that's specifically the venue checklist.
 
-### Step 2: Start the Qualifier Gazebo sim
+**If you genuinely want to write more software here:**
+1. Add a blue-armor HSV mask alongside the red one (defensive: rules don't specify color).
+2. Add a YOLO RoboMaster detector as a fallback path, switchable via env var. Reuse the Qualifier `barrel_yolo.pt` training pipeline.
+3. Build a `pad_input_parser.py` that tolerates 3-4 likely organizer JSON formats so day-zero confusion is impossible.
 
-```bash
-/home/drone/stop_sim.sh         # clean any stale
-/home/drone/start_sim.sh --no-qgc
-python3 /home/drone/set_ekf_origin.py
-```
-
-Wait for the drone to be visible in Gazebo. (You don't need to arm or fly — the bridge subscribes to ground-truth pose regardless of armed state.)
-
-### Step 3: Verify Gazebo pose topic is alive
-
-```bash
-gz topic -e -t /model/x500_vision_0/pose -n 1 | head -20
-```
-
-You should see a `Pose_V` message with `name: "x500_vision_0"`. If the topic doesn't exist, the sim isn't fully up.
-
-### Step 4: Run the bridge
-
-```bash
-cd /home/drone/BrainHack-26
-source /opt/ros/humble/setup.bash      # if you installed ROS2
-PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python python3 codes/sim_uwb_bridge.py
-```
-
-Expected output:
-```
-[bridge] noise level=0, seed=system
-[bridge] drone='x500_vision', rate=10.0 Hz
-[bridge] gz subscribed: /model/x500_vision_0/pose
-[bridge] ros2 publisher up on /uwb_tag at 10.0 Hz
-[bridge] noise model: σ_xy=0.00 m, σ_z=0.00 m, bias_xy=0.00 m, dropout=0.0%, nlos_prob/tick=0.0%
-```
-
-### Step 5: Verify ROS2 topic is alive
-
-In another terminal:
-```bash
-source /opt/ros/humble/setup.bash
-ros2 topic hz /uwb_tag                  # expect ~10 Hz
-ros2 topic echo /uwb_tag --once         # expect PoseStamped with the drone's GT
-```
-
-If `ros2 topic list` shows `/uwb_tag` but `echo` blocks → QoS mismatch. The bridge uses `BEST_EFFORT`; subscriber must match.
-
-### Step 6: Run with noise
-
-Once perfect mode works:
-```bash
-BH26_UWB_NOISE=1 BH26_UWB_SEED=42 \
-  PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python \
-  python3 codes/sim_uwb_bridge.py
-```
-
-You should see the same output but with noise applied. Confirm by `ros2 topic echo` showing values that wobble around the GT.
-
-### Step 7: Drive it with kolomee.py (or adapted version)
-
-`kolomee.py` connects to PX4 via `serial:///dev/ttyS6:921600`. For SITL we need `udpin://0.0.0.0:14540`. Make a SITL-friendly copy first:
-
-```bash
-mkdir -p codes/finals
-cp references/finalist_codes/uwb_mavsdk/kolomee.py codes/finals/kolomee_sitl.py
-sed -i 's|serial:///dev/ttyS6:921600|udpin://0.0.0.0:14540|' codes/finals/kolomee_sitl.py
-```
-
-Then with the bridge running:
-```bash
-cd codes/finals
-PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python python3 kolomee_sitl.py
-```
-
-Expected behaviour: drone arms (after `y` confirmation), takes off, navigates two waypoints, lands. Watch the bridge logs and ROS2 topic to confirm the loop is closed.
-
-### Step 8: Fix the bugs
-
-While testing, fix the bugs we documented in `docs/kolomee_dissection.md §5.4` — missing `await`s, CPU-spin in failure path, dead `KP_SCALE`. These will cause silent failures in the noise-1 case.
+None of these unblock anything critical. Pre-U end-to-end is achievable as-is given hardware time.
 
 ---
 
-## 6. Stale-file decisions made this session
+## 7. Memory pointers
 
-- **Deleted:** `HANDOVER_DEPTH.md`. It documented a 2026-05-23 depth-camera all-inf bug that was resolved before the Qualifier finished. The resolution (lightweight OakD-Lite SDF patch) is already captured in `sdf-patches/OakD-Lite.model.sdf` + memory file `project_oakd_lite_lightweight.md`. Keeping the stale handover misdirected readers.
-- **Kept** (despite being Qualifier-only): `codes/measure_drift.py`, `px4-patches/`, `sdf-patches/`, `codes/mission.py` and friends. None are deleted — they're useful for sim-based bench tests and code reading.
+`/home/drone/.claude/projects/-home-drone-BrainHack-26/memory/`:
 
----
+- `project_preu_scope.md` — **Pre-U does Challenge 2 only**. This was the load-bearing scope correction this session.
+- `project_sitl_ekf_kolomee.md` — Why SITL kolomee testing has a hard ceiling. Don't retry the EKF patch.
+- `project_protobuf_workaround.md` — Still applies to the bridge if reused.
+- `feedback_restart_between_scripts.md` — Sim restart pattern, relevant only if running the bridge.
 
-## 7. Branches we've been carrying
-
-| Branch | Status | Recommendation |
-|---|---|---|
-| `main` | Qualifier final, pushed | **Leave alone** — this is the artefact we shipped. |
-| `prep/finals` | Current, Finals docs + bridge WIP | **Use this for active work.** |
-| `experiment/wall-follow-reactive` | Qualifier experiment, merged to main | Keep around briefly, can delete after Finals |
-| `experiment/high-altitude-survey` | Qualifier experiment, didn't merge | Keep around briefly, can delete after Finals |
-
-Next-agent: do not start new branches for individual files; keep working on `prep/finals` for the next few hours. Spin a new branch only when the integration is big enough to warrant isolation.
+The Qualifier-era memories are still on disk and informative for context, but Pre-U Stage 2 doesn't touch any of them.
 
 ---
 
-## 8. Memory pointers
+## 8. What to read first if you've never seen this repo
 
-Auto-memory at `/home/drone/.claude/projects/-home-drone-BrainHack-26/memory/`. Key Qualifier-era notes that are **still relevant** for Finals:
+1. This document.
+2. `materials/RoboVerse 2026 Finals.pdf` — focus on the "Challenge Two" section.
+3. `codes/finals/stage2_mission.py` top docstring + `navigate_to_pad` docstring.
+4. `codes/finals/mocks/pyhulax_mock.py` top docstring.
+5. `TUTORIAL.md` Ch 24 (pyhulax) — answers "why threading not asyncio" and lists open API questions.
 
-- `feedback_restart_between_scripts.md` — sim must be restarted between Python script runs; the bridge will hit this too if it shares state with `mission.py`.
-- `project_protobuf_workaround.md` — every script that imports `gz.msgs10` needs the `PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python` env-var. Applies to `sim_uwb_bridge.py`.
-- `project_oakd_lite_lightweight.md` — the SDF patch that fixed depth.
-- `project_drone_model.md` — Discord ruling on drone model (Qualifier-specific).
-- `project_qualifier_rules.md` — Qualifier scoring (historical).
-- `project_barrel_truth.md` — ground-truth barrel counts (Qualifier-specific).
-- `project_camera_params.md` — Qualifier intrinsics; Finals will have different RealSense intrinsics.
-
-No Finals-specific memory entries yet. Worth adding once we know the venue's UWB topic name, coordinate convention, ArUco scheme, etc.
+Total time: ~30 min for a confident pickup. The codebase is small, well-commented, and tested.
 
 ---
 
-## 9. The shortest path to "Finals integration sanity-checked"
-
-If you have only one session of work, do these in order:
-
-1. **Verify the bridge** — §5 steps 1-6. Expected time: 30-60 min if ROS2 is preinstalled, +60 min if you need to install ROS2.
-2. **Adapt kolomee.py for SITL** — `serial://` → `udpin://`. ~10 min.
-3. **Run kolomee against the bridge** — §5 step 7. Expected: drone takes off, navigates 2 waypoints, lands. ~30 min including troubleshooting.
-4. **Fix the kolomee bugs** documented in `docs/kolomee_dissection.md §5.4`. ~15 min.
-5. **Commit `prep/finals` and push** — so the next agent has a real checkpoint. ~5 min.
-
-After that, the next major thread is `stage1_mission.py` — sketch is in `docs/kolomee_dissection.md §10`.
-
----
-
-## 10. What to read first if you've never seen this repo
-
-1. This document (you just did).
-2. `materials/RoboVerse 2026 Finals.pdf` — the Finals rules.
-3. `TUTORIAL.md` Part 2 (chapters 18-29). Mandatory for the Finals vocabulary.
-4. `docs/kolomee_dissection.md` — the workshop reference's architecture.
-5. `RUNBOOK.md` Part 2 (Phases 7-15) — the prep schedule with gates.
-
-After that you're current. Total reading time: ~90 min for the engineer-quality read.
-
----
-
-*End of handover. The current state of the repo is just-paused, fully committable. Next agent should commit `sim_uwb_bridge.py` + this handover + the `HANDOVER_DEPTH.md` deletion as their first action.*
+*End of handover. Repo is at a clean checkpoint, working tree clean, 4 unpushed commits on `prep/finals`. Push from your terminal then either move to hardware day or pause until hardware time is available.*

@@ -235,31 +235,101 @@ def run_drone_mission(m: DroneMission, stop_event: threading.Event) -> None:
 #  NAVIGATION (stub — hardware-day work)
 # ============================================================================
 
-def navigate_to_pad(drone, pad: Pad) -> None:
-    """Fly the drone to the pad's (x, y, z).
+# Takeoff is assumed to leave the drone at this altitude (arena +Z, metres).
+# Used as the starting Z for navigate_to_pad's vertical correction.
+TAKEOFF_ALT_M = float(os.environ.get("BH26_TAKEOFF_ALT_M", "1.0"))
 
-    TODO (hardware day): pick one of three approaches and remove the stub.
+# Axis convention at takeoff. Default assumption: HULAs face arena +X at
+# launch (so Direction.FORWARD moves arena +X, Direction.RIGHT moves +Y).
+# Each value below can be flipped on calibration day if the convention is
+# different at the venue. Recognized values: "+x", "-x", "+y", "-y".
+BH26_AXIS_FORWARD = os.environ.get("BH26_AXIS_FORWARD", "+x").lower()
+BH26_AXIS_RIGHT   = os.environ.get("BH26_AXIS_RIGHT",   "+y").lower()
 
-    Option A — `drone.goto(x, y, z)` if pyhulax exposes it.
-        Cleanest. Closed-source SDK — check pyhulax.xenops.ae before
-        depending on it.
+# How close to the waypoint (in metres) we consider "arrived" — moves
+# smaller than this are skipped to save time.
+NAV_EPSILON_M = float(os.environ.get("BH26_NAV_EPSILON_M", "0.05"))
 
-    Option B — decompose into body-frame `.move(Direction.X, distance)`
-        steps. Requires knowing the drone's yaw at takeoff (all 3 HULAs
-        launch from the same C2 pad facing the same direction, so a
-        single calibration at startup is enough). Bench-tested distance
-        unit (huladola.py comment claims metres but library is closed-
-        source — verify with a tape measure).
 
-    Option C — visual servo: climb to known altitude, search the camera
-        feed for the assigned pad's ArUco / colour patch, descend onto it.
-        Most robust to positioning errors but most code.
+def _axis_split(axis: str) -> tuple[str, int]:
+    """Parse axis spec like '+x', '-y' into (axis_letter, sign)."""
+    if len(axis) != 2 or axis[0] not in "+-" or axis[1] not in "xy":
+        raise ValueError(f"invalid axis {axis!r}; expected one of +x/-x/+y/-y")
+    return axis[1], (1 if axis[0] == "+" else -1)
 
-    For now this stub just sleeps to simulate flight time.
+
+def _direction_for_axis(axis_letter: str, sign: int, positive: bool) -> "Direction":
+    """Pick the pyhulax Direction enum value for the requested axis + polarity.
+
+    `positive` here is the *desired* polarity in arena coordinates after
+    accounting for axis sign convention. e.g. if FORWARD maps to +x and we
+    need to move arena +x, we return Direction.FORWARD; if FORWARD maps to
+    -x we return Direction.BACK.
     """
-    print(f"  [navigate_to_pad] stub — pretending to fly to "
-          f"pad {pad.pad_id} ({pad.x:.2f}, {pad.y:.2f}, {pad.z:.2f})")
-    time.sleep(2.0)
+    # Look up which pair of Directions to consider for this axis letter.
+    if axis_letter == "x":
+        forward_dir, back_dir = Direction.FORWARD, Direction.BACK
+        right_dir,   left_dir = Direction.RIGHT,   Direction.LEFT
+    else:  # 'y'
+        forward_dir, back_dir = Direction.RIGHT,   Direction.LEFT
+        right_dir,   left_dir = Direction.FORWARD, Direction.BACK
+    # Resolve sign + polarity.
+    want_pos = positive if sign == 1 else not positive
+    return forward_dir if want_pos else back_dir
+
+
+def navigate_to_pad(drone, pad: Pad) -> None:
+    """Fly the drone to (pad.x, pad.y, pad.z) using sequential body-frame moves.
+
+    Decomposes the target into three orthogonal moves issued in order:
+    vertical first (so the drone isn't dragging across pads at low alt),
+    then forward/back, then left/right.
+
+    Assumptions (all venue-calibratable via env vars at top of file):
+      - Drone launches from the C2 origin at (0, 0, TAKEOFF_ALT_M).
+      - At takeoff, Direction.FORWARD maps to BH26_AXIS_FORWARD in arena frame.
+      - At takeoff, Direction.RIGHT   maps to BH26_AXIS_RIGHT   in arena frame.
+      - pyhulax `.move(direction, distance)` takes a positive distance in metres.
+
+    Open question (hardware day):
+      - If pyhulax exposes `.goto(x, y, z)` or similar absolute-position
+        API, prefer that — it self-corrects for accumulated drift across
+        moves. The decomposition here is just the fallback for the
+        documented `.move()` interface.
+    """
+    # Where the drone currently believes it is (in arena coordinates).
+    cur_x, cur_y, cur_z = 0.0, 0.0, TAKEOFF_ALT_M
+    # Compute target deltas.
+    dx = pad.x - cur_x
+    dy = pad.y - cur_y
+    dz = pad.z - cur_z
+    print(f"  [navigate_to_pad] {pad.pad_id}: from ({cur_x:.2f},{cur_y:.2f},"
+          f"{cur_z:.2f}) -> ({pad.x:.2f},{pad.y:.2f},{pad.z:.2f}); "
+          f"delta=({dx:+.2f},{dy:+.2f},{dz:+.2f})")
+
+    # 1) Vertical first (climb or descend to pad altitude).
+    if abs(dz) >= NAV_EPSILON_M:
+        v_dir = Direction.UP if dz > 0 else Direction.DOWN
+        print(f"  [navigate_to_pad] {v_dir.name} {abs(dz):.2f} m")
+        drone.move(v_dir, abs(dz))
+
+    # 2) Forward / back along BH26_AXIS_FORWARD.
+    fwd_axis, fwd_sign = _axis_split(BH26_AXIS_FORWARD)
+    fwd_delta = dx if fwd_axis == "x" else dy
+    if abs(fwd_delta) >= NAV_EPSILON_M:
+        fwd_dir = _direction_for_axis(fwd_axis, fwd_sign, fwd_delta > 0)
+        print(f"  [navigate_to_pad] {fwd_dir.name} {abs(fwd_delta):.2f} m")
+        drone.move(fwd_dir, abs(fwd_delta))
+
+    # 3) Left / right along BH26_AXIS_RIGHT.
+    rt_axis, rt_sign = _axis_split(BH26_AXIS_RIGHT)
+    rt_delta = dx if rt_axis == "x" else dy
+    if abs(rt_delta) >= NAV_EPSILON_M:
+        rt_dir = _direction_for_axis(rt_axis, rt_sign, rt_delta > 0)
+        print(f"  [navigate_to_pad] {rt_dir.name} {abs(rt_delta):.2f} m")
+        drone.move(rt_dir, abs(rt_delta))
+
+    print(f"  [navigate_to_pad] {pad.pad_id} arrival")
 
 
 # ============================================================================
