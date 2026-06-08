@@ -1,146 +1,51 @@
 # BrainHack-26 RoboVerse
 
-This repo started as our Qualifier entry (autonomous barrel detection in PX4 SITL + Gazebo) and is now being extended for the Finals (real-hardware Mapping Drone + HULA swarm).
-
-**Where things live now:**
-
-| For… | Read… |
-|---|---|
-| **Onboarding from scratch** | `TUTORIAL.md` Part 1 (Qualifier concepts: NED, MAVSDK, async, intrinsics) → Part 2 (Finals concepts: UWB, ArUco, RKNN, pyhulax, ROS2) |
-| **Step-by-step prep with gates** | `RUNBOOK.md` Phases 0-6 (Qualifier, done) → Phases 7-15 (Finals, in progress) |
-| **Workshop reference code** | `references/qualifier_codes/` and `references/finalist_codes/` |
-| **Competition rule sheets** | `materials/RoboVerse 2026 Qualifier.pdf` and `materials/RoboVerse 2026 Finals.pdf` |
-| **Deep architecture reads** | `docs/kolomee_dissection.md` (the workshop's reference UWB nav script, line-by-line) |
-| **Background on the Qualifier SITL EKF problem** | `HANDOVER_DEPTH.md` |
-
-The original Qualifier mission code (`codes/mission.py` and friends) stays in-place. It still flies in Gazebo and is the basis for the upcoming sim-based testing of Finals navigation code (Phase 7+). Nothing has been deleted.
+Team's code for the **BrainHack-26 RoboVerse** autonomous-drone competition.
+- **Qualifier:** passed.
+- **Finals:** Pre-University category, Challenge 2 only (HULA swarm landing + ambush).
 
 ---
 
-## Qualifier section (still useful, still works)
+## 👉 Start here
 
-Autonomous barrel-detection mission for the `x500_vision` drone in PX4 SITL +
-Gazebo Harmonic. Built for the BrainHack-26 RoboVerse Qualifier 2026.
+**[`START_HERE.md`](START_HERE.md)** — single comprehensive guide. Read this if you've just joined the team or are picking the project up after a break. Covers status, how to run the test mission, what to do on competition day, troubleshooting, and a glossary.
 
-## Repo layout
+---
 
-```
-.
-├── codes/                # mission Python + launcher scripts
-│   ├── mission.py            # main orchestrator (spin-at-spots strategy)
-│   ├── mission_config.py     # all tunable parameters
-│   ├── barrel_tracker.py     # NED projection + dedup + validation
-│   ├── barrel_yolo.pt        # fine-tuned YOLOv10n (5.5 MB)  *** REQUIRED ***
-│   ├── run_competition.sh    # ONE-COMMAND launcher: sim + QGC + EKF + mission
-│   ├── install.sh            # one-shot setup / verify
-│   ├── show_camera.py        # optional raw RGB viewer
-│   ├── RUN.txt               # human-readable competition runbook
-│   ├── JUDGE_SUMMARY.md      # one-page pitch for the judges
-│   └── (Detector.py, AvoidancePlanner.py, drone_control.py, ... — reference modules)
-├── scripts/              # simulator helpers
-│   ├── start_sim.sh          # launches PX4 SITL + Gazebo (+ optional QGC) in screen
-│   ├── stop_sim.sh           # tears everything down
-│   ├── set_ekf_origin.py     # sends SET_GPS_GLOBAL_ORIGIN over MAVLink
-│   └── set_ekf_origin.sh     # thin shell wrapper around the .py
-├── sdf-patches/          # SDF replacements
-│   └── OakD-Lite.model.sdf   # lightweight 640x480 @ 10 Hz RGB sensor
-├── references/           # workshop reference code (untouched)
-└── materials/            # competition PDFs
-```
-
-## Quick start on a fresh VM
-
-Prerequisite: VMware image from the organiser with Ubuntu 22.04 + PX4 +
-Gazebo Harmonic + MAVSDK pre-installed. Plus the trained YOLO weights
-copied into `codes/barrel_yolo.pt`.
+## Quick-launch (for people who already know the project)
 
 ```bash
-git clone <this-repo> ~/BrainHack-26
-cd ~/BrainHack-26/codes
-
-# One-time setup (verifies deps + patches the OakD-Lite SDF):
-./install.sh
-
-# Each attempt — single command, brings up sim + QGC + flies the mission:
-./run_competition.sh
+cd ~/BrainHack-26/codes/finals
+./run_stage2.sh --short     # 25-second end-to-end smoke test (mock drones)
 ```
 
-`run_competition.sh` opens an OpenCV "YOLO Detections" window showing live
-annotated bounding boxes as the drone flies. **Ctrl-C cleans up everything.**
-
-Outputs land in `/mnt/hgfs/Shared/` (the VM shared folder) or
-`~/mission_output/` if no shared folder is mounted:
-
-- `barrels.json` — detection list (raw + validated subsets)
-- `yolo_detections/` — annotated JPEGs (one per detection event)
-
-## Environment overrides
-
+Run the test suite:
 ```bash
-PX4_DIR=/path/to/PX4-Autopilot      ./run_competition.sh
-QGC_PATH=/path/to/QGroundControl    ./run_competition.sh
-BH26_STRATEGY=high_alt               ./run_competition.sh  # experimental
-BH26_DISPLAY=0                       ./run_competition.sh  # headless mode
+cd ~/BrainHack-26/codes/finals
+python3 -m unittest tests.test_stage2 -v
 ```
 
-## Strategies
+Real hardware mode:
+```bash
+./run_stage2.sh --real --pads <organizers' pad file>
+```
 
-`run_competition.sh` prompts at launch which strategy to use. Override the prompt with `--wallfollow / --spin / --high-alt`, `--strategy <name>`, or `BH26_STRATEGY=<name>` env var.
+---
 
-**All three strategies use the same depth-based obstacle avoidance** (`AvoidancePlanner.compute_clearance`), which is what the Qualifier rules require. They differ in *how* they choose the next heading.
+## Repo layout (1-minute version)
 
-### 1. `wallfollow` (default — best observed result)
+| Path | What's in it |
+|---|---|
+| `codes/finals/` | **Active stack.** Pre-U Stage 2 orchestrator, mock, tests, launcher. |
+| `materials/` | Competition rules + workshop slides (PDFs). |
+| `references/finalist_codes/` | Workshop reference code for Finals (mostly Stage 1 / University). |
+| `references/qualifier_codes/` | Workshop reference for the Qualifier. |
+| `codes/` (top level) | Qualifier-era code. Kept for reference; not used in Finals. |
+| `scripts/`, `px4-patches/`, `sdf-patches/` | Qualifier simulator helpers and patches. Not used for Finals. |
+| `TUTORIAL.md` | Long-form concept reference. Chapter 24 (pyhulax) is the Pre-U-relevant part. |
+| `RUNBOOK.md` | Phased prep checklist. |
+| `docs/` | Deeper dives (currently: a Stage 1 reference dissection). |
 
-1. Take off to ~1.2 m.
-2. Loop until 280 s bailout: read depth, compute left/centre/right clearance, choose one of:
-   - **FORWARD** if center > 2.5 m
-   - **DRIFT_RIGHT** if center > 1.0 m and right > 2.5 m (creep + lean)
-   - **TURN_RIGHT** if right > 2.5 m
-   - **TURN_LEFT** if left > 2.5 m
-   - **BACK_UP + spin** if all blocked
-3. **Body-frame velocity commands only.** No NED position setpoints — EKF drift is irrelevant to navigation; IMU yaw + depth are the only inputs.
+---
 
-Single-run result on the example map: **5 validated detections (3 yellow + 2 red — matches ground truth)**.
-
-### 2. `spin` (closer to workshop's recommended pipeline)
-
-1. Take off, rotate 360° in place to scan all directions.
-2. Pick the heading with best clearance + bias against backtracking.
-3. Sprint forward up to 12 m via bounded position setpoints.
-4. Repeat for up to 12 spots or until 280 s.
-
-Uses the AvoidancePlanner exactly as Material 2 slide 30 describes (NED position setpoints, "closed-loop pipeline"). More conservative — stays near spawn (~5-10 m). Single-run result: **1 validated red**.
-
-### 3. `high_alt` (experimental)
-
-1. Take off, climb to 6.5 m altitude (above wall tops).
-2. Lawnmower-sweep at altitude.
-
-EKF Z drifts past ~3 m altitude on this VM, so the drone tends to dive back down mid-mission. Recorded for completeness.
-
-YOLO detections are projected to NED via pixel + depth + drone pose, then
-deduplicated (4 m radius) and validated (hits ≥ 2 OR conf ≥ 0.75).
-
-Multi-attempt is encouraged — the rules let teams re-run within 10 min and
-score the best attempt. Just run `./run_competition.sh` again after Ctrl-C.
-
-## Compliance notes
-
-- **Drone model:** `x500_vision` (organiser Discord ruling — "has to be vision drone").
-- **No GPS check:** code gates arming on `is_armable` and `is_home_position_ok`,
-  never on `is_global_position_ok` (always False with EV fusion).
-- **EKF origin:** set explicitly via MAVLink `SET_GPS_GLOBAL_ORIGIN` (see
-  `scripts/set_ekf_origin.py`). Slide 14 of LearningMaterial2 confirms this
-  is required for the vision drone to become armable.
-- **All camera processing in background:** depth + RGB run on dedicated
-  gz-transport threads; YOLO on a worker pool. The main asyncio loop never
-  blocks on image I/O (organiser's explicit guidance).
-- **No manual control:** entire run is autonomous via `mission.py`.
-
-## Known limitations
-
-The `gz-sim-odometry-publisher` plugin on `x500_vision` feeds PX4's EKF a
-noisy ground-truth pose stream that the estimator cannot fully reject.
-Horizontal drift up to ~10 m can accumulate in a 280-s flight. We
-compensate via the multi-attempt rule and conservative spin-then-sprint
-behaviour. See `codes/JUDGE_SUMMARY.md` for background.
+For everything else, read [`START_HERE.md`](START_HERE.md).
