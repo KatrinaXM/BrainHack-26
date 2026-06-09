@@ -97,9 +97,11 @@ From the brief's Schedule page. Pre-U highlights:
 | Day | Time | What |
 |---|---|---|
 | Day 1 | 0930-1030 | **Briefing** (attend with the whole team) |
-| Day 1 | 1030-1300 | Testing (Pre-U can test the HULA in the Drone Cage) |
-| Day 1 | 1330-1800 | More testing time |
+| Day 1 | 1030-1200 | Testing (Pre-U can test the HULA in the Drone Cage) |
+| Day 1 | 1200-1300 | Lunch (no testing) |
+| Day 1 | 1300-1800 | Testing (Pre-U continues; University is busy with Challenge 1 from 1430) |
 | Day 2 | 0900-1230 | Final testing |
+| Day 2 | 1230-1330 | Lunch (no testing) |
 | Day 2 | 1330-1600 | **Challenge 2** — the actual competition |
 
 **Testing rules:**

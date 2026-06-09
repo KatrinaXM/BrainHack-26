@@ -164,8 +164,8 @@ class VideoStream:
     def _make_marker_patch(self, marker_id: int, size: int = 120) -> np.ndarray:
         """Render an ArUco marker as an RGB patch using cv2.aruco.
 
-        Import cv2 lazily so the mock stays importable on cv2-less envs
-        (tests can skip ArUco-dependent paths by setting BH26_MOCK_NO_MARKERS).
+        Import cv2 lazily so the mock stays importable on cv2-less envs;
+        a missing cv2 makes _generate_frame silently skip the marker paint.
         """
         import cv2  # local import — keeps module-level import minimal
         d = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
