@@ -8,6 +8,7 @@
 
 ## Table of contents
 
+0. [🤖 Bootstrap a Claude (AI assistant) session](#0--bootstrap-a-claude-ai-assistant-session)
 1. [What this project is, in plain English](#1-what-this-project-is-in-plain-english)
 2. [Where we are right now (status)](#2-where-we-are-right-now-status)
 3. [The Finals competition explained simply](#3-the-finals-competition-explained-simply)
@@ -22,6 +23,100 @@
 12. [Questions still open for organizers](#12-questions-still-open-for-organizers)
 13. [Glossary of unfamiliar terms](#13-glossary-of-unfamiliar-terms)
 14. [Going deeper (optional reading)](#14-going-deeper-optional-reading)
+
+---
+
+## 0. 🤖 Bootstrap a Claude (AI assistant) session
+
+If you have **Claude Code** (the CLI tool) or any other AI coding assistant with access to this repo on your laptop, paste one of the prompts below to get the assistant up to speed immediately. This is the fastest way to get help on competition day without explaining everything from scratch.
+
+> **Where to paste these:** if you're using Claude Code in a terminal, you can either type the prompt at its prompt or save it to a file and run `claude < prompt.txt`. If you're using Claude in a web browser tab, paste the prompt directly. The repo must be at `~/BrainHack-26` for the prompts to "just work" — adjust the path if it lives elsewhere.
+
+### 0.1 Master bootstrap (use this first)
+
+Paste this whenever you start a fresh AI session. It tells the assistant who you are, what the project is, and where to look. After it confirms it's ready, you can ask for help with any specific step.
+
+```
+I'm at BrainHack-26 RoboVerse Finals (Pre-University category, Challenge 2 only). The team's repo is at ~/BrainHack-26 on the branch `prep/finals`.
+
+Quick context you need to know:
+- Pre-U does CHALLENGE 2 ONLY (HULA swarm landing + ArUco-marker detection on ground robots). Ignore Stage 1 / Mapping Drone / UWB stuff.
+- The active code is in `codes/finals/`. Everything else in the repo is reference/Qualifier-era.
+- The official rules are `materials/Finals brief.pptx`.
+- I'm a beginner with Linux and the terminal. Give me EXACT copy-paste commands, one at a time. After each command I'll paste the output and you'll tell me the next step.
+
+Please do these now in order:
+1. Read `~/BrainHack-26/START_HERE.md` end-to-end (the beginner guide; long but each section is short).
+2. Read `~/BrainHack-26/codes/finals/stage2_mission.py` (the main orchestrator program — state machine, navigation, ArUco detector, snapshot saver).
+3. Skim `~/BrainHack-26/codes/finals/mocks/pyhulax_mock.py` (just enough to know what the offline mock provides).
+4. Run `cd ~/BrainHack-26 && git log --oneline -10` to see recent commits — these tell you what changed and why.
+
+After you've done all four, tell me you're ready and ask what I need help with right now. Don't make up answers — if you don't know something, say so and check the brief PDF (`materials/Finals brief.pptx`) or ask me.
+```
+
+### 0.2 Run the actual competition mission (Day 2 afternoon)
+
+Use this when you have real HULAs in front of you, pyhulax is installed, and you're about to fly the actual scored mission.
+
+```
+[paste the master bootstrap above first, then continue with this]
+
+The organizers just gave us the pad coordinates via Discord. Right now I need to:
+1. Save the pad list into `~/BrainHack-26/codes/finals/competition_pads.json` in the JSON format START_HERE.md §9.5 shows. I'll paste the Discord text and you'll convert it for me.
+2. Walk me through running the real mission with `--real` mode, applying our calibration env vars from §9.4 (I have them written down).
+3. Help me inspect the snapshots after the mission completes and confirm what to submit to the judges.
+
+Treat every step as a separate paste-this-and-run instruction. Wait for me to confirm before moving to the next one.
+```
+
+### 0.3 Calibration help (Day 1 testing slot)
+
+Use this during your first venue testing slot to walk through Tests A/B/C in START_HERE §9.4.
+
+```
+[paste the master bootstrap above first, then continue with this]
+
+I'm in a 5-minute testing slot at the venue with 1 HULA. I need to do the three calibration tests in START_HERE.md §9.4:
+- Test A: confirm HULA discovery works on this Wi-Fi
+- Test B: figure out which Direction.FORWARD axis matches arena +x (I'll observe the drone and tell you which way it flies)
+- Test C: confirm the ArUco dictionary the ground robots use matches our default DICT_6X6_250
+
+Please walk me through them one at a time. After Test B, give me the EXACT `export` commands to save the axis convention. After Test C, give me the EXACT `export BH26_ARUCO_DICT=...` command for whatever dictionary worked.
+
+Remember: I have 5 minutes and then a 20-minute cooldown. Be efficient. If we can't finish all three in one slot, prioritize Test A then Test B (those block the mission; Test C can usually wait).
+```
+
+### 0.4 Debug a mission failure
+
+Use this when something went wrong mid-mission.
+
+```
+[paste the master bootstrap above first, then continue with this]
+
+The mission just failed. Here's what happened: [PASTE the terminal output of the failed run, including the === MISSION SUMMARY === block at the bottom if there is one].
+
+Please:
+1. Diagnose what went wrong (state-machine error? ArUco not firing? drone crashed?).
+2. Cross-check against START_HERE.md §11 troubleshooting.
+3. Tell me whether we can re-run safely or whether this counts as our one attempt (brief: no re-attempts on crash). If we can re-run, give me the exact command including any env vars I should adjust based on the failure.
+```
+
+### 0.5 Quick sanity check before flying
+
+Use this 5-10 minutes before your scoring slot. Run on the laptop you'll use to fly.
+
+```
+[paste the master bootstrap above first, then continue with this]
+
+Pre-flight check. I want to confirm everything still works before we fly the real mission. Please tell me the EXACT commands to run, in order, to verify:
+1. The git repo is clean and on the right branch.
+2. The 18 unit tests still pass.
+3. The mock mission runs end-to-end (the `--short` smoke).
+4. pyhulax is importable.
+5. We can see HULAs on the network.
+
+After each step I'll paste the output and you'll tell me whether it's OK or what to fix.
+```
 
 ---
 
