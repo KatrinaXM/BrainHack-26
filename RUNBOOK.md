@@ -702,20 +702,25 @@ Skeleton: one Python thread per drone, each running its own state machine. Share
 
 ### 13.4 Mission integration
 
-Each HULA's mission:
+Each HULA's mission (Pre-U Stage 2 per Finals brief):
 1. Discovery (Dola).
-2. Receive target landing zone (n, e) from Stage-1 output.
+2. Receive target landing zone (x, y, z) from organizer Discord post.
 3. Takeoff.
 4. Move via body-relative commands toward the target. (HULA doesn't accept world coordinates — you must convert via locked-yaw assumption like the mapping drone.)
-5. Land.
-6. After all landed: start video-stream-based RoboMaster detection.
+5. Land on pad (Scoring Item 1: number of landings within hoop).
+6. Brief pad-hold (convoy enters cage).
+7. **Take off again** to ~1.1 m hover altitude (brief: "recommended height is 1.1m").
+8. Run ArUco detection on the live video stream — log every decoded ID.
+9. End-of-window: final land.
+10. Scoring Item 2: number of ArUco detections logged.
 
 ### 13.5 GATE 13
 
 - [ ] All 3 HULAs discovered + connected within ≤ 10 s.
 - [ ] Each can takeoff/land independently from the C2 terminal.
 - [ ] Three parallel takeoffs work without deadlock.
-- [ ] RKNN inference runs on snapshot frames from a HULA's video stream.
+- [ ] cv2.aruco runs on snapshot frames from a HULA's video stream and decodes test markers correctly.
+- [ ] Re-takeoff after landing works (Stage 2 mission requires landing then taking off again).
 
 ---
 

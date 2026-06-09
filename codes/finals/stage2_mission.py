@@ -1,37 +1,62 @@
 #!/usr/bin/env python3
 """
-stage2_mission.py — BrainHack-26 Finals Pre-University orchestrator
-===================================================================
+stage2_mission.py — BrainHack-26 Finals Pre-University Stage 2 orchestrator
+==========================================================================
 
 ONE Python process on the C2 laptop. Spawns one thread per HULA drone,
 each running an independent state machine:
 
-    IDLE -> TAKEOFF -> FLY_TO_PAD -> LANDING -> AMBUSH_WATCH -> COMPLETE
+    IDLE -> TAKEOFF -> FLY_TO_PAD -> LAND_ON_PAD -> PAD_HOLD
+         -> SEARCH_TAKEOFF -> AMBUSH_WATCH -> FINAL_LAND -> COMPLETE
 
-Per Pre-U rules (`materials/RoboVerse 2026 Finals.pdf`, Challenge Two):
+(If BH26_DO_AERIAL_SEARCH=0 the SEARCH_TAKEOFF / FINAL_LAND states are
+skipped and AMBUSH_WATCH runs from the landed position.)
 
-  1. Organisers provide a landing-zone list with valid/invalid flags.
-  2. We pick 3 valid zones, launch 3 HULAs from the C2 to land on them.
-  3. 5 RoboMaster ground robots enter the cage; HULAs detect + snapshot.
+Per `materials/Finals brief.pptx` (the load-bearing rules document),
+Challenge 2 Pre-University:
 
-Scored on landing accuracy + time, then snapshot count + accuracy + time.
+  1. Organisers post coordinates of 5 landing pads on Discord with
+     valid/invalid flags announced before assessment.
+  2. We pick 3 valid pads, launch 3 HULAs from the C2 to land on them
+     (SCORING ITEM 1: "Number of landings within hoop").
+  3. A convoy of 5 RoboMaster ground robots enters the cage and loiters.
+     Each robot carries a printed ArUco marker.
+  4. We launch the HULAs again from the pads to search for the robots.
+  5. HULAs detect the ArUco markers, log/print the decoded IDs
+     (SCORING ITEM 2: "Number of Aruco detections").
+  6. Inform judge mission complete.
+
+Hard rules (from the brief — violation = score invalidated):
+  - HULA max speed 0.5 m/s
+  - Recommended height 1.1 m
+  - NO FLYING OVER OBSTACLES (we stay at 1.1 m above ground throughout)
+  - NO RE-ATTEMPTS if the drone crashes. Be conservative.
 
 Usage
 -----
     python3 stage2_mission.py --pads pads.json
+    python3 stage2_mission.py --pads pads.json --phase land    # just land
+    python3 stage2_mission.py --pads pads.json --phase search  # just search
 
-Env vars
---------
-    BH26_PAD_FILE     overrides --pads
-    BH26_DOLA_LISTEN  Dola discovery window (s), default 5.0
-    BH26_OUTPUT_DIR   where snapshots land, default ./snapshots
-    BH26_AMBUSH_S     ambush watch window (s), default 120.0
+Env vars (calibrate at the venue, see START_HERE.md §8)
+-------------------------------------------------------
+    BH26_PAD_FILE          overrides --pads
+    BH26_DOLA_LISTEN       Dola discovery window (s), default 5.0
+    BH26_OUTPUT_DIR        where snapshots land, default ./snapshots
+    BH26_AMBUSH_S          ambush watch window (s), default 120.0
+    BH26_PAD_HOLD_S        pause on pad after landing (s), default 3.0
+    BH26_TAKEOFF_ALT_M     HULA altitude after takeoff (m), default 1.1
+    BH26_SEARCH_ALT_M      HULA altitude during ArUco search (m), default 1.1
+    BH26_DO_AERIAL_SEARCH  "1" (default) or "0" — re-takeoff after pad hold
+    BH26_ARUCO_DICT        ArUco dictionary name, default DICT_6X6_250
+    BH26_AXIS_FORWARD      "+x" / "-x" / "+y" / "-y", default "+x"
+    BH26_AXIS_RIGHT        same options, default "+y"
+    BH26_NAV_EPSILON_M     skip moves smaller than this (m), default 0.05
+    BH26_SNAPSHOT_COOLDOWN_S  min seconds between snapshots, default 2.0
 
-Status: SKELETON. Real pyhulax navigation and RoboMaster detection are
-stubbed. See the TODO blocks for what hardware-day work unblocks.
-
-Reference: `references/finalist_codes/hula_swarm/huladola.py`,
-`TUTORIAL.md` Ch 24 (pyhulax glossary + the open API questions).
+Reference: `references/finalist_codes/hula_swarm/huladola.py` (workshop
+example), `TUTORIAL.md` Ch 24 (pyhulax + open API questions),
+`materials/Finals brief.pptx` (rules).
 """
 
 from __future__ import annotations
@@ -92,12 +117,18 @@ except ImportError:
 #  CONFIG (env-var-overridable)
 # ============================================================================
 
-DOLA_LISTEN_S    = float(os.environ.get("BH26_DOLA_LISTEN", "5.0"))
-OUTPUT_DIR       = Path(os.environ.get("BH26_OUTPUT_DIR", "./snapshots"))
-AMBUSH_WINDOW_S  = float(os.environ.get("BH26_AMBUSH_S",   "120.0"))
-NUM_DRONES       = 3        # fixed: Pre-U Stage 2 always uses 3 HULAs
-MISSION_TIMEOUT_S = 600.0   # safety: hard kill after 10 min
-TICK_HZ          = 5.0      # per-drone state-machine tick rate
+DOLA_LISTEN_S      = float(os.environ.get("BH26_DOLA_LISTEN", "5.0"))
+OUTPUT_DIR         = Path(os.environ.get("BH26_OUTPUT_DIR",   "./snapshots"))
+AMBUSH_WINDOW_S    = float(os.environ.get("BH26_AMBUSH_S",    "120.0"))
+PAD_HOLD_S         = float(os.environ.get("BH26_PAD_HOLD_S",  "3.0"))
+DO_AERIAL_SEARCH   = os.environ.get("BH26_DO_AERIAL_SEARCH", "1") == "1"
+SEARCH_ALT_M       = float(os.environ.get("BH26_SEARCH_ALT_M", "1.1"))
+NUM_DRONES         = 3        # fixed: Pre-U Stage 2 always uses 3 HULAs per brief
+# Per Finals brief, mission max time is 8 minutes for Challenge 2.
+# We use 9 minutes (540 s) here as a hard safety kill — anything beyond
+# that is wasted time the judges will have already cut us off.
+MISSION_TIMEOUT_S  = 540.0
+TICK_HZ            = 5.0      # per-drone state-machine tick rate
 
 
 # ============================================================================
@@ -151,13 +182,16 @@ def select_pads(pads: list[Pad], n: int = NUM_DRONES) -> list[Pad]:
 # ============================================================================
 
 class DroneState(enum.Enum):
-    IDLE          = "idle"
-    TAKEOFF       = "takeoff"
-    FLY_TO_PAD    = "fly_to_pad"
-    LANDING       = "landing"
-    AMBUSH_WATCH  = "ambush_watch"
-    COMPLETE      = "complete"
-    ERROR         = "error"
+    IDLE           = "idle"
+    TAKEOFF        = "takeoff"
+    FLY_TO_PAD     = "fly_to_pad"
+    LAND_ON_PAD    = "land_on_pad"
+    PAD_HOLD       = "pad_hold"        # landed, waiting briefly for convoy
+    SEARCH_TAKEOFF = "search_takeoff"  # second takeoff to SEARCH_ALT_M
+    AMBUSH_WATCH   = "ambush_watch"    # watching for ArUco markers (from air or pad)
+    FINAL_LAND     = "final_land"      # end-of-mission land
+    COMPLETE       = "complete"
+    ERROR          = "error"
 
 
 @dataclasses.dataclass
@@ -172,6 +206,7 @@ class DroneMission:
     snapshots_saved: int = 0
     last_snapshot_at: float = 0.0
     last_error: str = ""
+    marker_ids_seen: set = dataclasses.field(default_factory=set)
 
     def transition(self, new: DroneState) -> None:
         print(f"[{self.plane_id}] {self.state.value} -> {new.value}")
@@ -182,12 +217,20 @@ class DroneMission:
         return time.time() - self.state_entered_at
 
 
-def run_drone_mission(m: DroneMission, stop_event: threading.Event) -> None:
+def run_drone_mission(
+    m: DroneMission, stop_event: threading.Event,
+    do_land: bool = True, do_search: bool = True,
+) -> None:
     """Single drone's state machine. One thread per HULA.
 
     pyhulax is *synchronous* (no asyncio), so each .takeoff()/.move()/.land()
     call blocks this thread until the action completes. Threads are cheap;
     3 threads for 3 HULAs is fine.
+
+    Phase control:
+      - do_land=True  do_search=True   → full mission (default)
+      - do_land=True  do_search=False  → land only, stop after PAD_HOLD
+      - do_land=False do_search=True   → start in air, only do search
     """
     tick_period = 1.0 / TICK_HZ
     m.transition(DroneState.IDLE)
@@ -195,7 +238,13 @@ def run_drone_mission(m: DroneMission, stop_event: threading.Event) -> None:
     while not stop_event.is_set():
         try:
             if m.state == DroneState.IDLE:
-                m.transition(DroneState.TAKEOFF)
+                if do_land:
+                    m.transition(DroneState.TAKEOFF)
+                elif do_search:
+                    # Skip landing — start from takeoff for search-only mode.
+                    m.transition(DroneState.SEARCH_TAKEOFF)
+                else:
+                    m.transition(DroneState.COMPLETE)
 
             elif m.state == DroneState.TAKEOFF:
                 m.drone.takeoff()
@@ -203,16 +252,40 @@ def run_drone_mission(m: DroneMission, stop_event: threading.Event) -> None:
 
             elif m.state == DroneState.FLY_TO_PAD:
                 navigate_to_pad(m.drone, m.pad)
-                m.transition(DroneState.LANDING)
+                m.transition(DroneState.LAND_ON_PAD)
 
-            elif m.state == DroneState.LANDING:
+            elif m.state == DroneState.LAND_ON_PAD:
                 m.drone.land()
+                m.transition(DroneState.PAD_HOLD)
+
+            elif m.state == DroneState.PAD_HOLD:
+                # Brief pause: lets scoring item 1 ("landings within hoop")
+                # complete cleanly and gives time for the convoy to enter
+                # the cage before we start the search phase.
+                if m.time_in_state() >= PAD_HOLD_S:
+                    if not do_search:
+                        m.transition(DroneState.COMPLETE)
+                    elif DO_AERIAL_SEARCH:
+                        m.transition(DroneState.SEARCH_TAKEOFF)
+                    else:
+                        # Land-based watch only (drone stays on pad).
+                        m.transition(DroneState.AMBUSH_WATCH)
+
+            elif m.state == DroneState.SEARCH_TAKEOFF:
+                m.drone.takeoff()
                 m.transition(DroneState.AMBUSH_WATCH)
 
             elif m.state == DroneState.AMBUSH_WATCH:
                 ambush_tick(m)
                 if m.time_in_state() >= AMBUSH_WINDOW_S:
-                    m.transition(DroneState.COMPLETE)
+                    if DO_AERIAL_SEARCH and do_search:
+                        m.transition(DroneState.FINAL_LAND)
+                    else:
+                        m.transition(DroneState.COMPLETE)
+
+            elif m.state == DroneState.FINAL_LAND:
+                m.drone.land()
+                m.transition(DroneState.COMPLETE)
 
             elif m.state in (DroneState.COMPLETE, DroneState.ERROR):
                 return
@@ -237,7 +310,9 @@ def run_drone_mission(m: DroneMission, stop_event: threading.Event) -> None:
 
 # Takeoff is assumed to leave the drone at this altitude (arena +Z, metres).
 # Used as the starting Z for navigate_to_pad's vertical correction.
-TAKEOFF_ALT_M = float(os.environ.get("BH26_TAKEOFF_ALT_M", "1.0"))
+# Per Finals brief: "recommended height is 1.1m". Anything higher risks
+# the "no flying over obstacles" violation.
+TAKEOFF_ALT_M = float(os.environ.get("BH26_TAKEOFF_ALT_M", "1.1"))
 
 # Axis convention at takeoff. Default assumption: HULAs face arena +X at
 # launch (so Direction.FORWARD moves arena +X, Direction.RIGHT moves +Y).
@@ -333,71 +408,93 @@ def navigate_to_pad(drone, pad: Pad) -> None:
 
 
 # ============================================================================
-#  ROBOMASTER DETECTION (stub — software-day work)
+#  ARUCO DETECTION (the actual scored thing — per Finals brief)
 # ============================================================================
 
+# Per Finals brief: ground robots carry ArUco markers; "Number of Aruco
+# detections" is one of the two scoring items. DICT_6X6_250 matches what
+# was documented for the Mapping Drone in TUTORIAL Ch 22 — most likely
+# the same dictionary is used on the ground robots, but CONFIRM AT VENUE.
+ARUCO_DICT_NAME = os.environ.get("BH26_ARUCO_DICT", "DICT_6X6_250")
+
+# Lazy-initialised so cv2-less environments don't pay the cost.
+_ARUCO_DETECTOR = None
+
+
+def _get_aruco_detector():
+    """Lazy-init the ArUco detector. Returns None if cv2 isn't available."""
+    global _ARUCO_DETECTOR
+    if _ARUCO_DETECTOR is not None:
+        return _ARUCO_DETECTOR
+    if not CV2_AVAILABLE:
+        return None
+    dict_id = getattr(cv2.aruco, ARUCO_DICT_NAME, None)
+    if dict_id is None:
+        raise RuntimeError(
+            f"unknown ArUco dictionary {ARUCO_DICT_NAME!r}; "
+            f"try DICT_4X4_50, DICT_5X5_100, DICT_6X6_250, DICT_APRILTAG_36h11"
+        )
+    aruco_dict = cv2.aruco.getPredefinedDictionary(dict_id)
+    params = cv2.aruco.DetectorParameters()
+    _ARUCO_DETECTOR = cv2.aruco.ArucoDetector(aruco_dict, params)
+    return _ARUCO_DETECTOR
+
+
 def ambush_tick(m: DroneMission) -> None:
-    """Pull the latest video frame, run RoboMaster detection, snapshot if hit."""
+    """Pull the latest video frame, run ArUco detection, snapshot if hit."""
     if m.video is None:
         return
     f = m.video.latest_frame
     if f is None:
         return
     frame = f.to_rgb()
-    detected, bboxes = detect_robomaster(frame)
+    detected, markers = detect_aruco_markers(frame)
     if detected:
-        save_snapshot(frame, m, bboxes)
+        save_snapshot(frame, m, markers)
 
 
-# Detector tunables (env-overridable for calibration day at the venue).
-DETECT_MIN_AREA_PX  = int(os.environ.get("BH26_DETECT_MIN_AREA",  "400"))
-DETECT_MAX_AREA_PX  = int(os.environ.get("BH26_DETECT_MAX_AREA",  "60000"))
-DETECT_MIN_ASPECT   = float(os.environ.get("BH26_DETECT_MIN_ASPECT", "0.3"))
-DETECT_MAX_ASPECT   = float(os.environ.get("BH26_DETECT_MAX_ASPECT", "3.0"))
+def detect_aruco_markers(frame) -> tuple[bool, list]:
+    """Detect ArUco markers in an RGB frame.
 
+    Returns (detected, markers). Each marker is a dict:
+        {"id": int, "corners": [[x,y], [x,y], [x,y], [x,y]],
+         "bbox": {"x": int, "y": int, "w": int, "h": int}}
 
-def detect_robomaster(frame) -> tuple[bool, list]:
-    """Return (detected, bboxes). Colour-based RoboMaster armour-plate detector.
-
-    HSV thresholding for red (RoboMaster armour plates are red/blue
-    backlit panels). Two hue ranges because red wraps the hue cylinder.
-    Filters contours by area + aspect ratio to reject noise.
-
-    Tunable via BH26_DETECT_* env vars — calibrate on real footage at
-    the venue. For competition day, also consider replacing this with
-    a YOLOv8 model (Qualifier-trained pipeline can be reused), but the
-    colour approach has no model file to manage.
+    Per Finals brief, this is the load-bearing scoring path: "Number of
+    Aruco detections" is scored at 30% (Pre-U). The decoded ID is what
+    we need to "print" per the rules — we save it in the JSON sidecar
+    and overlay it on the snapshot JPEG.
     """
     if not CV2_AVAILABLE or frame is None:
         return (False, [])
 
-    hsv = cv2.cvtColor(frame, cv2.COLOR_RGB2HSV)
-    # Red wraps around H=0; two windows to capture both sides.
-    mask1 = cv2.inRange(hsv, (0,   120, 60), (10,  255, 255))
-    mask2 = cv2.inRange(hsv, (170, 120, 60), (180, 255, 255))
-    mask = cv2.bitwise_or(mask1, mask2)
-    # Light cleanup so single-pixel speckles don't pass the area filter.
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,
-                            cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))
+    det = _get_aruco_detector()
+    if det is None:
+        return (False, [])
 
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
-                                   cv2.CHAIN_APPROX_SIMPLE)
-    bboxes: list[dict] = []
-    for c in contours:
-        area = float(cv2.contourArea(c))
-        if area < DETECT_MIN_AREA_PX or area > DETECT_MAX_AREA_PX:
-            continue
-        x, y, w, h = cv2.boundingRect(c)
-        if h == 0:
-            continue
-        aspect = w / float(h)
-        if aspect < DETECT_MIN_ASPECT or aspect > DETECT_MAX_ASPECT:
-            continue
-        bboxes.append({
-            "x": int(x), "y": int(y), "w": int(w), "h": int(h),
-            "area": area, "aspect": round(aspect, 3),
+    # ArUco detection works on grayscale; convert if needed.
+    gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+    corners, ids, _ = det.detectMarkers(gray)
+
+    if ids is None or len(ids) == 0:
+        return (False, [])
+
+    markers: list[dict] = []
+    for marker_corners, marker_id in zip(corners, ids.flatten()):
+        # marker_corners shape: (1, 4, 2) — 4 corner xy points
+        pts = marker_corners.reshape(4, 2)
+        xs, ys = pts[:, 0], pts[:, 1]
+        x_min, y_min = int(xs.min()), int(ys.min())
+        x_max, y_max = int(xs.max()), int(ys.max())
+        markers.append({
+            "id": int(marker_id),
+            "corners": [[float(x), float(y)] for x, y in pts],
+            "bbox": {
+                "x": x_min, "y": y_min,
+                "w": x_max - x_min, "h": y_max - y_min,
+            },
         })
-    return (len(bboxes) > 0, bboxes)
+    return (True, markers)
 
 
 # How long after the last snapshot before we'll save another one.
@@ -406,11 +503,14 @@ def detect_robomaster(frame) -> tuple[bool, list]:
 SNAPSHOT_COOLDOWN_S = float(os.environ.get("BH26_SNAPSHOT_COOLDOWN_S", "2.0"))
 
 
-def save_snapshot(frame, m: DroneMission, bboxes: list) -> None:
-    """Persist the detected frame + bbox metadata to OUTPUT_DIR.
+def save_snapshot(frame, m: DroneMission, markers: list) -> None:
+    """Persist the detected frame + ArUco marker metadata to OUTPUT_DIR.
 
-    Writes both an annotated JPEG and a JSON sidecar (one per snapshot).
-    Cooldown-throttled to avoid flooding when a robot lingers in frame.
+    Writes both an annotated JPEG (with marker outlines + decoded IDs)
+    and a JSON sidecar listing each marker ID. The IDs are the load-
+    bearing artefact for scoring — judges will look for them.
+
+    Cooldown-throttled to avoid flooding when a marker lingers in frame.
     """
     now = time.time()
     if now - m.last_snapshot_at < SNAPSHOT_COOLDOWN_S:
@@ -422,25 +522,40 @@ def save_snapshot(frame, m: DroneMission, bboxes: list) -> None:
     ts = int(now * 1000)
     stem = OUTPUT_DIR / f"{m.plane_id}_{m.snapshots_saved:03d}_{ts}"
 
+    marker_ids = [int(mk["id"]) for mk in markers]
+    # Track unique marker IDs seen across the whole mission for reporting.
+    for mid in marker_ids:
+        m.marker_ids_seen.add(mid)
+
     if CV2_AVAILABLE:
         bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        # Draw bboxes in green so reviewers can see what triggered the save.
-        for b in bboxes:
-            cv2.rectangle(bgr, (b["x"], b["y"]),
-                          (b["x"] + b["w"], b["y"] + b["h"]),
-                          (0, 255, 0), 2)
+        # Draw each marker's outline + its decoded ID as a label.
+        for mk in markers:
+            corners = mk["corners"]
+            pts = [(int(c[0]), int(c[1])) for c in corners]
+            # Outline in green.
+            for i in range(4):
+                cv2.line(bgr, pts[i], pts[(i + 1) % 4], (0, 255, 0), 2)
+            # ID label above the marker, in yellow on black background.
+            label = f"ID={mk['id']}"
+            x, y = pts[0]
+            cv2.putText(bgr, label, (x, max(20, y - 10)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4)
+            cv2.putText(bgr, label, (x, max(20, y - 10)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
         cv2.imwrite(str(stem) + ".jpg", bgr)
 
     with open(str(stem) + ".json", "w") as f:
         json.dump({
-            "plane_id": m.plane_id,
-            "pad_id": m.pad.pad_id,
-            "snapshot_num": m.snapshots_saved,
-            "ts_ms": ts,
-            "bboxes": bboxes,
+            "plane_id":      m.plane_id,
+            "pad_id":        m.pad.pad_id,
+            "snapshot_num":  m.snapshots_saved,
+            "ts_ms":         ts,
+            "marker_ids":    marker_ids,
+            "markers":       markers,
         }, f, indent=2)
     print(f"[{m.plane_id}] snapshot {m.snapshots_saved} -> {stem}.jpg "
-          f"({len(bboxes)} bbox)")
+          f"(ids={marker_ids})")
 
 
 # ============================================================================
@@ -495,13 +610,25 @@ def main() -> int:
         default=os.environ.get("BH26_PAD_FILE"),
         help="JSON file with pad list (or BH26_PAD_FILE env var)",
     )
+    parser.add_argument(
+        "--phase", choices=["both", "land", "search"], default="both",
+        help=("'both' (default): land HULAs on pads then take off again to "
+              "search for ArUco markers. 'land': land only (Scoring Item 1). "
+              "'search': start from current state, run only the search "
+              "phase (Scoring Item 2)."),
+    )
     args = parser.parse_args()
 
     if not args.pads:
         sys.exit("--pads (or BH26_PAD_FILE env var) is required")
 
+    do_land = args.phase in ("both", "land")
+    do_search = args.phase in ("both", "search")
+
     print(f"[main] backend={PYHULAX_BACKEND} cv2={'yes' if CV2_AVAILABLE else 'no'} "
-          f"output_dir={OUTPUT_DIR} ambush_window_s={AMBUSH_WINDOW_S}")
+          f"phase={args.phase} aerial_search={DO_AERIAL_SEARCH}")
+    print(f"[main] output_dir={OUTPUT_DIR} ambush_window_s={AMBUSH_WINDOW_S} "
+          f"takeoff_alt_m={TAKEOFF_ALT_M} search_alt_m={SEARCH_ALT_M}")
 
     # 1. Load + select landing zones
     pads = load_pads(Path(args.pads))
@@ -527,6 +654,7 @@ def main() -> int:
     for m in missions:
         t = threading.Thread(
             target=run_drone_mission, args=(m, stop),
+            kwargs={"do_land": do_land, "do_search": do_search},
             name=f"drone-{m.plane_id}", daemon=True,
         )
         t.start()
@@ -549,11 +677,18 @@ def main() -> int:
     for t in threads:
         t.join(timeout=5.0)
 
-    # 6. Summary
+    # 6. Summary — show per-drone state + total unique marker IDs detected,
+    # since that's the score-relevant artefact.
+    all_marker_ids: set = set()
     print("\n=== MISSION SUMMARY ===")
     for m in missions:
+        all_marker_ids.update(m.marker_ids_seen)
         print(f"  {m.plane_id}: state={m.state.value} pad={m.pad.pad_id} "
-              f"snapshots={m.snapshots_saved} err={m.last_error or '-'}")
+              f"snapshots={m.snapshots_saved} "
+              f"marker_ids={sorted(m.marker_ids_seen)} "
+              f"err={m.last_error or '-'}")
+    print(f"  TOTAL unique ArUco IDs detected: {sorted(all_marker_ids)} "
+          f"(count={len(all_marker_ids)})")
 
     return 0 if all(m.state == DroneState.COMPLETE for m in missions) else 1
 

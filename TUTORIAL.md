@@ -978,8 +978,8 @@ Same structure as Qualifier (§13), but with different boxes:
     │  7. set_velocity_ned(vn, ve, vd, locked_yaw)       │
     │  8. sleep 100 ms                                   │
     │                                                     │
-    │  every N frames: rknn.inference(color) for         │
-    │  RoboMaster detection (Stage 2)                    │
+    │  every N frames: ArUco detection on color frame    │
+    │  (Stage 2 — ArUco markers printed on RoboMasters)  │
     └─────────────────────────────────────────────────────┘
 ```
 
@@ -1005,7 +1005,10 @@ Same triage logic as Qualifier §15. Order of attack:
 8. **Top-down depth map writer.** Save the deliverable Stage 1 wants.
 9. **HULA discovery + single takeoff/land from C2.** Switch context to Stage 2.
 10. **All three HULAs to predetermined landing pads.**
-11. **RoboMaster detection** with the RKNN-converted YOLO.
+11. **ArUco detection on RoboMaster markers** with cv2.aruco (Pre-U).
+    University teams can layer a RKNN-converted YOLO on top as a
+    secondary signal, but ArUco IDs are the load-bearing scoring
+    artefact per the Finals brief.
 
 Levels 1-5 are realistic in 2 days. Levels 6-8 are a third day. Levels 9-11 are full integration; reserve a half-week.
 
