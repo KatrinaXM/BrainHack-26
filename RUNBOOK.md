@@ -545,12 +545,14 @@ Goal: detect a printed ArUco marker from the drone's camera, on the bench (not i
 
 ### 10.1 Print test markers
 
-On a colour printer, generate 3-4 markers from the `DICT_6X6_250` dictionary:
+On a colour printer, generate the markers using the **competition dictionary
+and IDs** (`DICT_7X7_1000`, IDs 11/45/51/67/101 — confirmed by organizers
+2026-06-10) so your practice markers match what you'll see on the day:
 
 ```python
 import cv2
-arucoDict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
-for marker_id in [7, 12, 42, 99]:
+arucoDict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_7X7_1000)
+for marker_id in [11, 45, 51, 67, 101]:
     img = cv2.aruco.generateImageMarker(arucoDict, marker_id, 600)
     cv2.imwrite(f"marker_{marker_id}.png", img)
 ```
@@ -678,7 +680,8 @@ The Finals expect a **top-down depth map**. Generate it from accumulated RealSen
 This step runs on the **C2 Terminal**, *not* the mapping drone. From the Ubuntu VM on the C2:
 
 ```bash
-pip install pyhulax       # may need vendor-provided wheel
+pip install "pyhulax[video,vision]"   # PyPI — the [video] extra is REQUIRED
+# dola is vendor-provided (NOT the broken PyPI 'dola') — get it from organizers
 python3 - <<'EOF'
 from dola import Dola
 d = Dola(); d.start()
@@ -700,13 +703,47 @@ Pick one HULA, connect, takeoff, hover 5 s, land. Verify video stream renders.
 
 Skeleton: one Python thread per drone, each running its own state machine. Shared resources (chosen landing zones, completion flags) behind `threading.Lock`.
 
+> **pyhulax API — confirmed facts** (from the official reference,
+> <https://pyhulax.xenops.ae/reference/pyhulax/>, cross-checked 2026-06-10).
+> These are now reflected in `codes/finals/stage2_mission.py`:
+> - **Distances are CENTIMETRES**, not metres: `move(direction, distance_cm)`,
+>   `takeoff(height_cm=100)`, `move_to(x, y, z)` (cm), `get_position()` → cm.
+>   Pad files are metres → the orchestrator multiplies by `BH26_DIST_SCALE`
+>   (default 100). **This was a latent 100× bug; now fixed.**
+> - **`takeoff()` default is 100 cm (1.0 m)** — we pass `height_cm=110` for
+>   the brief's 1.1 m.
+> - **`move_to(x, y, z)` DOES accept coordinates** (the old "HULA doesn't
+>   accept world coordinates" note was wrong). With QR localization OFF it's
+>   relative to the takeoff origin; with `set_qr_localization(True)` it's
+>   ABSOLUTE on the arena mat. Selectable via `BH26_NAV_MODE=move_to` +
+>   `BH26_QR_LOCALIZATION=1`.
+> - Useful extras now known to exist: `get_battery()`, `get_position()`,
+>   `hover(duration_seconds)`, `rotate(angle_degrees)`, and a closed-loop
+>   `create_flight_controller().fly_to(x, y, z, yaw)`.
+> - **Still unverified by docs** (test at the venue): whether `takeoff()`
+>   works again after `land()`, and the exact axis orientation of move/move_to.
+>
+> **ArUco + pads — confirmed by organizers (Discord, 2026-06-10):**
+> - Dictionary `DICT_7X7_1000`, marker IDs `11, 45, 51, 67, 101`, on the
+>   GROUND ROBOTS (Stage-2 landing points carry no markers). Wired into
+>   `stage2_mission.py` (`BH26_ARUCO_DICT` default + `BH26_EXPECTED_IDS`).
+> - The 5 Stage-2 landing points are staged in `codes/finals/competition_pads.json`
+>   (IDs 11/45/51/67/101; metres; set valid flags on the day).
+> - HULA hardware manual: <https://ds-api.hg-fly.net/manuals/Hula_EN.html>
+>   (max 10 m AGL, 3 m/s — hardware/APP, not SDK).
+
 ### 13.4 Mission integration
 
 Each HULA's mission (Pre-U Stage 2 per Finals brief):
 1. Discovery (Dola).
 2. Receive target landing zone (x, y, z) from organizer Discord post.
-3. Takeoff.
-4. Move via body-relative commands toward the target. (HULA doesn't accept world coordinates — you must convert via locked-yaw assumption like the mapping drone.)
+3. Takeoff (to `height_cm=110` for the brief's 1.1 m).
+4. Fly to the target. Two strategies, both implemented in `stage2_mission.py`:
+   (a) `BH26_NAV_MODE=move` (default) — sequential body-frame `move()` steps
+   decomposed from the pad delta, under the locked-yaw assumption; or
+   (b) `BH26_NAV_MODE=move_to` — one `move_to(x, y, z)` straight-line flight
+   (relative to takeoff origin, or absolute with `BH26_QR_LOCALIZATION=1`).
+   All distances auto-scaled metres→cm via `BH26_DIST_SCALE`.
 5. Land on pad (Scoring Item 1: number of landings within hoop).
 6. Brief pad-hold (convoy enters cage).
 7. **Take off again** to ~1.1 m hover altitude (brief: "recommended height is 1.1m").
@@ -720,7 +757,8 @@ Each HULA's mission (Pre-U Stage 2 per Finals brief):
 - [ ] Each can takeoff/land independently from the C2 terminal.
 - [ ] Three parallel takeoffs work without deadlock.
 - [ ] cv2.aruco runs on snapshot frames from a HULA's video stream and decodes test markers correctly.
-- [ ] Re-takeoff after landing works (Stage 2 mission requires landing then taking off again).
+- [ ] **Re-takeoff after landing works** (Stage 2 mission requires landing then taking off again — docs don't confirm this; verify on hardware FIRST, it gates the whole two-phase mission).
+- [ ] **Distance units confirmed**: command a 2 m move and measure it. If the drone flies ~2 m, `BH26_DIST_SCALE=100` (cm) is right; if it barely twitches (~2 cm) something is off; if it flies ~200 m it's already metres → set `BH26_DIST_SCALE=1`.
 
 ---
 

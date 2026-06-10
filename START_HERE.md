@@ -61,10 +61,10 @@ Use this when you have real HULAs in front of you, pyhulax is installed, and you
 ```
 [paste the master bootstrap above first, then continue with this]
 
-The organizers just gave us the pad coordinates via Discord. Right now I need to:
-1. Save the pad list into `~/BrainHack-26/codes/finals/competition_pads.json` in the JSON format START_HERE.md §9.5 shows. I'll paste the Discord text and you'll convert it for me.
-2. Walk me through running the real mission with `--real` mode, applying our calibration env vars from §9.4 (I have them written down).
-3. Help me inspect the snapshots after the mission completes and confirm what to submit to the judges.
+The pad coordinates are already saved in `~/BrainHack-26/codes/finals/competition_pads.json` (from the 2026-06-10 Discord post). Right now I need to:
+1. Set the valid/invalid flags on the 5 pads in `competition_pads.json` based on the organizers' announcement (I'll tell you which are valid). If they re-posted different coordinates, help me update those too.
+2. Walk me through running the real mission with `--real` mode, applying our calibration env vars from §9.4 (I have them written down). The ArUco dictionary is already set to the confirmed `DICT_7X7_1000`.
+3. Help me inspect the snapshots after the mission completes and confirm what to submit to the judges (the `EXPECTED IDs [...] found [...]` summary line is the key check).
 
 Treat every step as a separate paste-this-and-run instruction. Wait for me to confirm before moving to the next one.
 ```
@@ -76,14 +76,16 @@ Use this during your first venue testing slot to walk through Tests A/B/C in STA
 ```
 [paste the master bootstrap above first, then continue with this]
 
-I'm in a 5-minute testing slot at the venue with 1 HULA. I need to do the three calibration tests in START_HERE.md §9.4:
+I'm in a 5-minute testing slot at the venue with 1 HULA. I need to do the calibration tests in START_HERE.md §9.4 (there are five — A, D, E, B, C — in that priority order):
 - Test A: confirm HULA discovery works on this Wi-Fi
+- Test D: confirm the HULA can TAKE OFF AGAIN after landing (our two-phase mission depends on it; if it can't, we use --no-aerial)
+- Test E: confirm distance units — command a 2 m move, I'll tell you how far it actually flew, and you give me the BH26_DIST_SCALE to use
 - Test B: figure out which Direction.FORWARD axis matches arena +x (I'll observe the drone and tell you which way it flies)
 - Test C: confirm the ArUco dictionary the ground robots use matches our default DICT_6X6_250
 
-Please walk me through them one at a time. After Test B, give me the EXACT `export` commands to save the axis convention. After Test C, give me the EXACT `export BH26_ARUCO_DICT=...` command for whatever dictionary worked.
+Please walk me through them one at a time. After each, give me the EXACT `export` command(s) to save what we learned (BH26_DIST_SCALE, BH26_AXIS_FORWARD/RIGHT, BH26_ARUCO_DICT, and whether to use --no-aerial).
 
-Remember: I have 5 minutes and then a 20-minute cooldown. Be efficient. If we can't finish all three in one slot, prioritize Test A then Test B (those block the mission; Test C can usually wait).
+Remember: I have 5 minutes and then a 20-minute cooldown. Be efficient. If we can't finish all five in one slot, the order above IS the priority — A, D, E block correctness; B and C are tuning.
 ```
 
 ### 0.4 Debug a mission failure
@@ -144,11 +146,15 @@ There's no neural network on the drone, no obstacle avoidance to write — the H
 - Launcher script (`codes/finals/run_stage2.sh`) — one command starts everything
 - **18 automated tests** that all pass in ~1 second
 
-**What still needs to happen:**
-- At the venue: confirm Wi-Fi allows drone discovery (§9 Test A)
-- At the venue: confirm `Direction.FORWARD` matches our assumption (§9 Test B)
-- At the venue: tune ArUco dictionary + detector params to actual lighting (§9 Test C)
+**What still needs to happen (all at the venue — see §9.4 for the five tests):**
+- Confirm Wi-Fi allows drone discovery (Test A)
+- **Confirm the HULA can take off again after landing** (Test D — our two-phase mission depends on it; fallback is `--no-aerial`)
+- **Confirm distance units** — the code converts metres→cm; verify with a 2 m move (Test E)
+- Confirm `Direction.FORWARD` matches our assumption (Test B)
+- Tune ArUco dictionary + detector params to actual lighting (Test C)
 - That's it for software. The rest is flying and scoring points.
+
+> **Note (2026-06-10):** we cross-checked the official pyhulax docs (<https://pyhulax.xenops.ae>) and fixed a latent **unit bug** — pyhulax distances are centimetres, our pad files are metres, so the code now scales by `BH26_DIST_SCALE` (default 100). We also pass the takeoff height explicitly (1.1 m, since `takeoff()` otherwise defaults to 1.0 m) and added an optional absolute-navigation mode (`BH26_NAV_MODE=move_to`). See §12 for what the docs resolved vs. what still needs the venue.
 
 ---
 
@@ -261,6 +267,12 @@ This is the most useful thing to do first. **It proves the software works** and 
 cd ~/BrainHack-26/codes/finals
 ```
 
+**Step 2b — One-time: install the Python dependencies** (only needed the first time on a fresh laptop — if the smoke test in Step 3 already works, skip this):
+```bash
+python3 -m pip install -r requirements.txt
+```
+This installs `numpy` + `opencv-python` (the ArUco detector needs them). It does **not** install `pyhulax`/`dola` — those come from the organisers on competition day and are only needed for `--real` mode.
+
 **Step 3 — Run the short smoke test:**
 ```bash
 ./run_stage2.sh --short --output /tmp/test_snapshots
@@ -336,7 +348,10 @@ The repo has a lot of files because it grew out of the Qualifier (which we passe
 | `codes/finals/mocks/pyhulax_mock.py` | Fake-drone simulator for offline testing. ~310 lines. Includes real ArUco markers in synthetic video. | Almost never — it just works. |
 | `codes/finals/tests/test_stage2.py` | 18 automated tests. | Run after any change to `stage2_mission.py`. |
 | `codes/finals/run_stage2.sh` | Launcher script. | Every time you run the mission. |
-| `codes/finals/pads_example.json` | Sample pad list (for testing). The real coordinates come **from Discord** on competition day. | When you need to test with custom pads. |
+| `codes/finals/pads_example.json` | Sample pad list (for testing only). | When you need to test with custom pads. |
+| `codes/finals/competition_pads.json` | **The real Stage-2 landing points** (IDs 11/45/51/67/101, from Discord 2026-06-10). | On the day — set valid/invalid flags, then fly with it. |
+| `codes/finals/competition_pads.README.md` | Provenance + the valid-flag TODO for the pads file. | Read before flying the real mission. |
+| `codes/finals/requirements.txt` | Python dependencies (`numpy`, `opencv-python`). | Once, on a fresh laptop: `pip install -r requirements.txt`. |
 | `materials/Finals brief.pptx` | **The official rules document.** Read this before competition day. | Before the competition; whenever rules are unclear. |
 | `materials/RoboVerse 2026 Finals.pdf` | Earlier rules version. The brief.pptx supersedes it where they differ. | Cross-reference only. |
 | `references/finalist_codes/hula_swarm/huladola.py` | Workshop's reference code (65 lines). The basic pyhulax pattern we copied. | If `stage2_mission.py` does something confusing — check the simpler reference. |
@@ -414,7 +429,7 @@ If your team is presenting the concept explanation, print 2 backup copies. Have 
 
 ### 8.6 Optional code improvements (very low priority)
 
-- Set `BH26_ARUCO_DICT` to a different dictionary if organizers confirm something other than DICT_6X6_250.
+- The ArUco dictionary is already set to the confirmed `DICT_7X7_1000` (IDs 11/45/51/67/101). Only change `BH26_ARUCO_DICT` if the organizers revise it on the day.
 - Add a YOLO RoboMaster detector as a secondary signal (low value — ArUco is what's scored).
 
 **None of these are required.** The current code matches the brief.
@@ -451,21 +466,44 @@ The HULAs talk to the laptop over Wi-Fi using **multicast** (a way for devices o
 
 ### 9.3 Install pyhulax
 
-You need the real pyhulax library on the laptop. The organizers should provide install instructions on the day. The general pattern (do this only when they tell you):
+You need the real pyhulax library **plus the `dola` discovery tool**. These install separately — and there's a gotcha we already hit, documented here so you don't lose time on the day:
 
+**pyhulax (from PyPI — works at home or anywhere with internet):**
 ```bash
-pip install pyhulax
+# NOTE the [video] extra — plain `pip install pyhulax` does NOT include
+# VideoStream, and our code needs it. This is the #1 install mistake.
+pip install "pyhulax[video,vision]"
+```
+Verify the pieces our code imports:
+```bash
+python3 -c "from pyhulax import DroneAPI; from pyhulax.core import Direction; from pyhulax.video import VideoStream; print('pyhulax OK')"
 ```
 
-To verify it worked:
+**`dola` (drone discovery — VENDOR-PROVIDED, not on PyPI):**
+> ⚠ **Do NOT run `pip install dola`.** There is an unrelated, broken package called `dola` on PyPI (by "Zeqiang Lai") — it is **not** the HULA discovery tool and will not work. The real `dola` (with `Dola.get_all_ips()`) comes from the **organizers** as a file or wheel on competition day. Ask them for it and install what they give you (e.g. `pip install ./dola-*.whl` or just drop `dola.py` next to the script).
+
+Verify dola once you have it:
 ```bash
-python3 -c "import pyhulax; import dola; print('OK')"
+python3 -c "from dola import Dola; print('dola OK')"
 ```
-If you see `OK`, you're good. If you see `ModuleNotFoundError`, the install didn't succeed — ask an organizer.
 
-### 9.4 Three calibration tests (do these in your first testing slot)
+**You can fly WITHOUT dola.** pyhulax connects to each drone by IP, so if the organizers give you the drone IPs (or multicast is blocked and dola finds nothing), skip discovery entirely with `--ips`:
+```bash
+./run_stage2.sh --real --pads competition_pads.json --ips 192.168.1.101,192.168.1.102,192.168.1.103
+```
+(equivalently `export BH26_HULA_IPS=192.168.1.101,192.168.1.102,192.168.1.103`). dola is then never imported. This makes `dola` a convenience, not a hard dependency — one less thing that can block you on the day.
 
-You have **5 minutes per test session, 20-minute cooldown after**. Plan to do all three calibrations in your first slot — it's tight but doable. Use the cooldown to update env vars based on what you saw.
+### 9.4 Calibration tests (do these in your first testing slots)
+
+You have **5 minutes per test session, 20-minute cooldown after**. There are now five things to confirm. **If you only get one slot, do them in this order** — the first three gate whether the mission is even *correct*; the last two just fine-tune it:
+
+1. **Test A — Discovery** (can we see the HULA at all?)
+2. **Test D — Re-takeoff after land** (does the two-phase mission work *at all*? **most important new test**)
+3. **Test E — Distance units** (is our metres→cm conversion right? a wrong answer means the drone flies 100× too far or too short)
+4. **Test B — Direction/axis** (which way is forward?)
+5. **Test C — ArUco dictionary** (does the detector fire on the real markers?)
+
+> **Why D and E are new and critical:** we cross-checked the official pyhulax docs (<https://pyhulax.xenops.ae>). They confirm distances are in **centimetres** (our pad files are metres — the code now multiplies by `BH26_DIST_SCALE=100`), and that `takeoff()` defaults to 1.0 m (we now request 1.1 m). But the docs do **not** confirm that a drone can take off again after landing — and our entire Scoring-Item-2 phase depends on it. Verify D before trusting a full run.
 
 #### Test A — Discovery works
 
@@ -508,54 +546,85 @@ Watch the drone. Mark "+x" on the arena floor with tape **before** the test (the
 - **Write down the env-var values you settled on** — you'll need them for the real mission.
 - Don't forget to set `NUM_DRONES = 3` back when calibration is done.
 
-#### Test C — ArUco detector calibration
+#### Test C — ArUco detector confirmation
 
-The brief uses ArUco markers on the ground robots. Our code defaults to `DICT_6X6_250` (the most common). The sample ArUco pad the organizers provide will tell you the dictionary.
+**The dictionary is now CONFIRMED** by the organizers (Discord, 2026-06-10): **`DICT_7X7_1000`**, with marker IDs **11, 45, 51, 67, 101** on the ground robots. This is already the code default — Test C is now just a quick *confirmation*, not a dictionary hunt.
 
 1. Hold the sample ArUco pad in front of the powered-on HULA's camera (organizer help may be needed to view the video feed).
-2. Run a short mission that lets you check snapshots:
+2. Run a short search-only mission:
    ```bash
    ./run_stage2.sh --real --pads /tmp/test_pad.json --ambush 10 --output /tmp/calib --phase search
    ```
    (`--phase search` skips landing — the drone hovers near the C2 and watches.)
-3. Look at the saved snapshots:
+3. Look at the saved snapshots and the summary line:
    ```bash
    ls /tmp/calib
    xdg-open /tmp/calib/*.jpg
    ```
-4. If a snapshot was taken with the correct ID visible (matching the sample pad), the dictionary is right.
-5. If **no snapshots were saved**: try other dictionaries:
+   The summary prints `EXPECTED IDs [11, 45, 51, 67, 101]: found [...]` — that's your confirmation the dictionary + IDs match.
+4. If a snapshot shows the right ID, you're done — leave the default.
+5. **Only if** the organizers change the dictionary on the day, or nothing detects: override it, e.g.
    ```bash
-   export BH26_ARUCO_DICT=DICT_4X4_50
-   # or DICT_5X5_100, DICT_APRILTAG_36h11
+   export BH26_ARUCO_DICT=DICT_6X6_250   # or DICT_5X5_100, DICT_APRILTAG_36h11
    ```
-   Re-run.
-6. **Write down the dictionary name that worked.**
+   and re-run. **Write down whatever dictionary worked.**
+
+#### Test D — Re-takeoff after land (CRITICAL — do this early)
+
+Our two-phase mission lands on the pad (Scoring Item 1), then **takes off again** to search for ArUco markers (Scoring Item 2). The pyhulax docs don't confirm a HULA *can* take off again after landing — so confirm it before trusting a full run.
+
+With one HULA and the one-pad file from Test B:
+```bash
+cd ~/BrainHack-26/codes/finals
+./run_stage2.sh --real --pads /tmp/test_pad.json --ambush 5
+```
+Watch for this sequence in the output (and on the drone):
+```
+[plane1] pad_hold -> search_takeoff
+[plane1] search_takeoff -> ambush_watch
+```
+- **If the drone takes off the second time:** ✅ re-takeoff works, the mission is valid as designed.
+- **If you see `EXCEPTION in search_takeoff`** (drone refuses to re-arm): the HULA won't take off again. Fall back to land-based watch — the drone stays on the pad and watches for markers from there:
+  ```bash
+  ./run_stage2.sh --real --pads /tmp/test_pad.json --no-aerial
+  ```
+  Write down: **use `--no-aerial`** for the real mission.
+- **If the second takeoff needs more settling time:** bump the pad hold:
+  ```bash
+  export BH26_PAD_HOLD_S=10
+  ```
+
+#### Test E — Distance units (confirm metres→cm)
+
+The code assumes pyhulax distances are **centimetres** (per the docs) and multiplies your metre-based pad coordinates by `BH26_DIST_SCALE` (default 100). Confirm the drone actually flies the distance you ask for.
+
+Make a pad exactly 2 m forward (reuse `/tmp/test_pad.json` from Test B: `x=2.0`). Fly Test B and **measure how far the drone actually travels**:
+- Flies **~2 m** → ✅ units correct, leave `BH26_DIST_SCALE=100`.
+- Barely moves (**~2 cm**) → the build wants metres, not cm: `export BH26_DIST_SCALE=1`
+- Flies way too far (**~200 m / hits the net immediately** — *be ready on the kill*) → it was already metres and we over-scaled: `export BH26_DIST_SCALE=1`
+- **Write down the `BH26_DIST_SCALE` value that worked.**
+
+> Optional: if the arena has a QR-localization mat, you can switch to absolute single-shot navigation with `export BH26_NAV_MODE=move_to` and `export BH26_QR_LOCALIZATION=1` — this makes all drones share one coordinate frame and self-correct drift. Only do this if Test E confirmed units *and* an organizer confirms the mat is active; otherwise the default `move` mode is safer.
 
 ### 9.5 Day 2: run the actual mission
 
-When the organizers give you the official pad coordinates **via Discord**:
+The official pad coordinates were posted **via Discord (2026-06-10)** and are **already saved** in `~/BrainHack-26/codes/finals/competition_pads.json` (5 landing points: IDs 11, 45, 51, 67, 101). See `competition_pads.README.md` for provenance.
 
-1. Save them as `competition_pads.json` in `~/BrainHack-26/codes/finals/`. Match this format (just write it into a text editor):
-   ```json
-   [
-     {"id": "P1", "x": 1.5, "y": 2.0, "z": 0.0, "valid": true},
-     {"id": "P2", "x": -1.0, "y": 0.5, "z": 0.0, "valid": false},
-     ...
-   ]
-   ```
-   If the Discord format is different (CSV, text), translate it by hand into this JSON — it's only 5 pads.
+1. **Set the valid/invalid flags.** The file currently marks all 5 pads `"valid": true` as a placeholder. When the organizers announce which pads are valid (the brief says you pick **3 of 5 valid** pads), edit `competition_pads.json` and set `"valid": false` on the invalid ones. `select_pads()` takes the first 3 valid pads in file order — reorder if you want specific ones.
+   - If the coordinates were re-posted/changed on the day, edit them to match. The format is one object per pad: `{"id": "11", "x": 1.35, "y": 4.40, "z": 0.0, "valid": true}`.
 
 2. Open the terminal and run:
    ```bash
    cd ~/BrainHack-26/codes/finals
 
    # Apply your calibration env vars (replace placeholder values with what you wrote down in §9.4)
-   export BH26_AXIS_FORWARD=+x
-   export BH26_AXIS_RIGHT=+y
-   export BH26_ARUCO_DICT=DICT_6X6_250
+   export BH26_AXIS_FORWARD=+x            # from Test B
+   export BH26_AXIS_RIGHT=+y              # from Test B
+   export BH26_ARUCO_DICT=DICT_7X7_1000   # confirmed by organizers (already the default)
+   export BH26_DIST_SCALE=100             # from Test E (100 = cm, the default; 1 = metres)
 
-   # Run the mission for real
+   # Run the mission for real.
+   # If Test D showed re-takeoff does NOT work, add --no-aerial here.
    ./run_stage2.sh --real --pads competition_pads.json
    ```
 
@@ -605,10 +674,11 @@ chmod +x ~/BrainHack-26/codes/finals/run_stage2.sh
 ```
 
 ### `python3: No module named 'cv2'` (or `numpy`)
-OpenCV isn't installed. Install:
+OpenCV isn't installed. Install everything the mission needs in one go:
 ```bash
-pip install opencv-python numpy
+python3 -m pip install -r ~/BrainHack-26/codes/finals/requirements.txt
 ```
+(or directly: `pip install opencv-python numpy`)
 
 ### `ModuleNotFoundError: No module named 'pyhulax'`
 Only matters in `--real` mode. The organizers will provide install instructions on the day.
@@ -622,6 +692,11 @@ The discovery only found N drones. Causes:
 - Drones aren't connected to the same Wi-Fi as your laptop
 - Wi-Fi blocks multicast (§9.2) — ask the organizers
 - One of the drones has a low battery and didn't boot
+
+**Workaround if multicast is the problem:** if you know the drone IPs, bypass discovery entirely — `./run_stage2.sh --real --pads competition_pads.json --ips IP1,IP2,IP3`. This skips dola/multicast and connects to each IP directly.
+
+### `no drone discovery available: the dola tool isn't installed...`
+You're in `--real` mode, `dola` isn't installed, and you didn't pass IPs. Either install the organizer-provided `dola`, or pass `--ips IP1,IP2,IP3` (see §9.3). For offline testing use `--mock`.
 
 ### `RuntimeError: need 3 valid pads, got N`
 The pad file has fewer than 3 valid pads. Either:
@@ -671,18 +746,25 @@ Many of our earlier questions are now answered by the brief. These remain:
 **About the network:**
 1. Does the venue Wi-Fi allow **multicast** traffic between client devices (needed for HULA discovery via Dola)? If not, is there an unmanaged switch / hotspot we can use?
 
-**About pyhulax:**
+**About pyhulax** (several of these are now answered by the official docs at <https://pyhulax.xenops.ae> — see "answered" list below; what remains):
 2. Where do we install `pyhulax` and `dola` from on competition day? (`pip install`? Local wheel?)
-3. Does pyhulax expose a `.goto(x, y, z)` method, or only `.move(direction, distance)`?
-4. What unit is the second argument to `.move()`? (Assumed metres — please confirm.)
-5. Is `Direction.FORWARD` body-frame (relative to drone heading) or world-frame? (Assumed body-frame.)
-6. What altitude does `.takeoff()` reach by default? (We assume 1.1 m per brief recommendation.)
-7. **Can a HULA take off again after landing?** Our mission requires this (land on pad for Scoring Item 1, then take off again for Scoring Item 2). What's the safe interval between land and takeoff?
+5. Is `Direction.FORWARD` body-frame (relative to drone heading) or world-frame? Docs say move maps to MAVLink relative-move commands (implies body-frame) but don't state it outright — **confirm with Test B/E**. (Our axis env vars handle either way.)
+7. **Can a HULA take off again after landing?** Our mission requires this (land on pad for Scoring Item 1, then take off again for Scoring Item 2). The docs do **not** show a re-takeoff example. What's the safe interval between land and takeoff? — **this is now Test D in §9.4; verify first.** If it fails, we fall back to `--no-aerial`.
+11. Does the arena have a **QR-localization mat**? If so we can use absolute `move_to` navigation (`BH26_NAV_MODE=move_to`, `BH26_QR_LOCALIZATION=1`) so all drones share one coordinate frame.
 
 **About the mission:**
-8. Which ArUco dictionary do the ground robots use? (We default to DICT_6X6_250.)
-9. What's the exact Discord format for the pad list? Text? Table? JSON?
 10. What signals the start of Stage B (convoy entry)? An organizer signal? A timer? Do we Ctrl+C between phases?
+
+**Answered by organizers (Discord, 2026-06-10) — reflected in the code:**
+- ✅ ArUco dictionary = **`DICT_7X7_1000`**, IDs **11, 45, 51, 67, 101** (was Q8; code default updated, expected-ID check added)
+- ✅ Markers are **only on the ground robots** — the Stage-2 landing points carry no markers
+- ✅ Pad list arrives as **free-text Discord coordinates** (was Q9); the 5 Stage-2 landing points are pre-staged in `competition_pads.json` (set valid flags on the day)
+
+**Already answered by the pyhulax docs (<https://pyhulax.xenops.ae>) — reflected in the code:**
+- ✅ Absolute-position API exists: `move_to(x, y, z)` and `curve_to(x, y, z)` (old Q3 "is there a `.goto()`?" — yes, it's `move_to`)
+- ✅ Distance unit is **centimetres**, not metres (old Q4) — code now scales metres→cm via `BH26_DIST_SCALE=100`
+- ✅ `takeoff()` default height is **100 cm (1.0 m)** (old Q6) — code now passes `height_cm=110` for the brief's 1.1 m
+- ✅ `move_to` frame: absolute on a QR mat if `set_qr_localization(True)`, else relative to the takeoff origin
 
 **Already answered by brief — recorded for completeness:**
 - ✅ 5 pads, pick 3
@@ -738,6 +820,8 @@ You don't need any of this to compete. Read it if you're curious or want to unde
 **ArUco detection reference:** `references/finalist_codes/aruco_detection/aruco_detection.py`. Shows the workshop's pattern for ArUco detection.
 
 **The competition rules in full:** `materials/Finals brief.pptx`. Read in PowerPoint / LibreOffice Impress.
+
+**The pyhulax control API:** <https://pyhulax.xenops.ae> (official reference — confirms units are centimetres, `move_to`/`takeoff` signatures, etc.). **The HULA hardware manual:** <https://ds-api.hg-fly.net/manuals/Hula_EN.html> (max 10 m altitude, 3 m/s; hardware/APP operation, not SDK specifics).
 
 **The Qualifier code we shipped:** `codes/mission.py` and friends. We won't run this at Finals but it's a clean example of the same patterns (state machines, threading, detection) on a different problem.
 
