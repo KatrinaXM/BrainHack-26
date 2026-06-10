@@ -4,3 +4,7 @@ __pycache__/
 /tmp/
 mission_output/
 snapshots/
+# Runtime artifacts from real-hardware runs and local testing
+logs/
+*.jsonl
+test_pad.json

@@ -1,0 +1,27 @@
+# BrainHack-26 Finals Pre-U Stage 2 — Python dependencies
+# =========================================================
+# Install on a fresh laptop (the C2 machine) with:
+#
+#     python3 -m pip install -r requirements.txt
+#
+# This is everything needed to run the mock mission + the 18 unit tests
+# OFFLINE (no HULA hardware). Verified on Python 3.10–3.14.
+
+# ArUco marker detection (the scored path) + frame buffers.
+# opencv-python bundles the GUI bits; swap for opencv-python-headless on a
+# server/CI box with no display. Either works — the snapshots are written to
+# disk, not shown in a cv2 window.
+numpy>=1.24
+opencv-python>=4.7
+
+# --- Real-hardware mode only (--real). NOT needed for mock/tests. ---
+#
+# pyhulax IS on PyPI, but you MUST include the [video] extra or VideoStream
+# is missing (our code imports pyhulax.video.VideoStream):
+#       pip install "pyhulax[video,vision]"
+#
+# dola (drone discovery) is VENDOR-PROVIDED — get it from the organizers on
+# the day (file or wheel). DO NOT `pip install dola`: the PyPI package of that
+# name is an unrelated, broken library, not the HULA discovery tool.
+#   pyhulax[video,vision]   # PyPI, but needs internet + the [video] extra
+#   dola                    # vendor-provided, NOT the PyPI 'dola'
