@@ -4,20 +4,20 @@
 session (human or AI) to know where things stand. Supersedes the old
 `HANDOVER_camera_livestream.md` (deleted) with the full picture.
 
-**Last updated:** 2026-06-10 · Branch `prep/finals` · Windows 11 + Git Bash · pyhulax 0.2.0, cv2 4.13
+**Last updated:** 2026-06-11 · Branch `prep/finals` · Windows 11 + Git Bash · pyhulax 0.2.0, cv2 4.13
 
 ---
 
 ## 1. One-line status
 
-Software is **complete and verified in simulation** (24 unit tests pass, mock
+Software is **complete and verified in simulation** (39 unit tests pass, mock
 mission runs end-to-end both nav modes). **Hardware is partially proven**: drones
 connect and fly, but a real flight had **2 of 3 drones drop** — root cause being
 nailed down (see §4). Camera livestream bring-up is in progress (§5).
 
 ## 2. Software state (verified in mock)
 
-- **24/24 unit tests pass** (`python -m unittest tests.test_stage2`), ~1.5 s.
+- **39/39 unit tests pass** (`python -m unittest tests.test_stage2`), ~1.5 s.
 - **Mock mission** completes the two-phase flow (land → re-takeoff → ArUco search
   → land) in both `move` and `move_to` nav modes.
 - **ArUco** (confirmed by organizers, Discord 2026-06-10): dictionary
@@ -154,3 +154,36 @@ python -m unittest tests.test_stage2          # 24 tests
 bash run_stage2.sh --short                    # mock smoke (~25 s)
 bash run_stage2.sh --real --pads competition_pads.json --ips IP1,IP2,IP3   # real
 ```
+
+## 9. Brief compliance audit (vs `materials/Finals brief.pptx`, 2026-06-11)
+
+Pre-U = **Challenge 2 only**: Stage A landings (44%) + Stage B ArUco ambush (44%)
++ bonus (CUAS 4% + concept 8%). Audited every Challenge-2 line of the brief:
+
+| Brief requirement (slide) | Status | Notes |
+|---|---|---|
+| Get valid landing coords from Discord; pick **3 of 5** (s6) | ✅ mech / ⚠ data | `configure.py` + `select_pads` take the first 3 *available*; `competition_pads.json` has 3 (7/10/12). Add the other 2 + flags if 5 are posted. |
+| Launch 3 HULAs from C2, land on zones (s6) | ✅ | discover → connect → takeoff → nav → land |
+| **No flying over obstacles; height 1.1 m** (s6) | ✅ | climb-only, hover 1.1 m, barrier mode |
+| **Max HULA speed 0.5 m/s** (s6) | ⚠ unverified | `MOVE_SPEED_LEVEL=300` (SLOW, gentlest preset) chosen; not *confirmed* ≤0.5 m/s. Check at venue. |
+| Land **within hoop**, accurate (s9) | ✅ code / ⚠ untestable | nav + position feedback aim for accuracy; precision unverifiable w/o flight + the single-origin assumption. |
+| Re-launch 3 HULAs to search rovers (s7) | ✅ | re-takeoff → yaw-scan ambush |
+| Detect ArUco on rovers; **PRINT outputs** (s7) | ✅ | `DICT_7X7_1000`, IDs 11/45/51/67/101; prints IDs + annotated JPG + JSON |
+| 2 rovers opponent-controlled (s7) | ✅ mitigated | yaw-scan widens coverage vs dodging rovers |
+| Inform judge when complete (s7) | ✅ manual | MISSION SUMMARY printed; operator tells the judge |
+| **Timing scored — faster = more points** (s9) | 🔴 GAP | ambush always runs the full window; no early-exit once all IDs are found |
+| **Mission max 8 min** (s5/6) | ⚠ config | 9-min safety kill; keep `BH26_AMBUSH_S` short enough to finish < 8 min |
+| Camera sees rover markers from 1.1 m hover | 🔴 untested | camera angle unconfirmed — test with `dronecheck.py --camera-angle N` |
+| Bonus: CUAS showcase + concept pitch (s10) | ✅ manual | non-code; START_HERE §10 |
+
+**No broken wiring / no missing core implementation** — the full pipeline
+(discover → connect → land → re-takeoff → yaw-scan ArUco search → land → report)
+is complete and tested in sim. The open items are validation/scoring, in order:
+
+1. 🔴 **Timing**: add early-exit from the ambush once all expected ArUco IDs are
+   detected across drones (directly improves the timed 44% Stage-B score).
+2. 🔴 **Camera angle**: confirm the camera actually sees floor markers from a
+   hover (the only flight-independent unknown — testable now on the ground).
+3. ⚠ **Speed ≤ 0.5 m/s**: confirm the SLOW level complies.
+4. ⚠ **8-min budget**: size `BH26_AMBUSH_S` so the whole run finishes < 8 min.
+5. ⚠ **Landing accuracy / single-origin**: unverifiable without a flying drone.
