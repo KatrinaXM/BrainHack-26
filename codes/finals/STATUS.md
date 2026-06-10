@@ -61,6 +61,11 @@ nailed down (see §4). Camera livestream bring-up is in progress (§5).
   (`available`/`valid`). Only available pads are assigned; need ≥3. Edit with
   `configure.py` (flag-setter) or by hand. **ArUco IDs are logged per detection**
   (`>>> ArUco detected IDs […]`) and summarised vs the expected set.
+- **Ambush early-exit** (`BH26_AMBUSH_EARLY_EXIT=1` default): ends the search the
+  instant every expected ArUco ID is detected across the drones — faster finish =
+  more Stage-B timing points — instead of always burning the full window.
+- **Launcher**: `python launch.py` is the friendly menu entry point (check drone,
+  mock/real mission, configure, tests, results) for the team and judges.
 
 ## 3. Competition facts (locked)
 
@@ -123,8 +128,9 @@ Find the IP after joining the drone's Wi-Fi AP: it's your Wi-Fi adapter's
 
 | File | Role |
 |------|------|
+| `launch.py` | **Interactive menu launcher** — the easy entry point for team + judges (check drone / mock / real / configure / tests / results). |
 | `stage2_mission.py` | The orchestrator (flies, headless, 3 drones). |
-| `run_stage2.sh` | Launcher (`--real`/`--mock`/`--short`, `--ips`, `--no-aerial`, `--phase`). |
+| `run_stage2.sh` | Low-level launcher (`--real`/`--mock`/`--short`, `--ips`, `--no-aerial`, `--phase`). |
 | `configure.py` | Easy editor + **availability flag-setter** for pads + drone IPs. |
 | `competition_pads.json` (+`.README.md`) | Landing points + availability flags (7/10/12 known). |
 | `drones.json` | Optional `{plane_id: ip}` map (created by `configure.py drone …`). |
@@ -171,7 +177,7 @@ Pre-U = **Challenge 2 only**: Stage A landings (44%) + Stage B ArUco ambush (44%
 | Detect ArUco on rovers; **PRINT outputs** (s7) | ✅ | `DICT_7X7_1000`, IDs 11/45/51/67/101; prints IDs + annotated JPG + JSON |
 | 2 rovers opponent-controlled (s7) | ✅ mitigated | yaw-scan widens coverage vs dodging rovers |
 | Inform judge when complete (s7) | ✅ manual | MISSION SUMMARY printed; operator tells the judge |
-| **Timing scored — faster = more points** (s9) | 🔴 GAP | ambush always runs the full window; no early-exit once all IDs are found |
+| **Timing scored — faster = more points** (s9) | ✅ | ambush **early-exits** the instant all expected IDs are detected (`BH26_AMBUSH_EARLY_EXIT=1`) |
 | **Mission max 8 min** (s5/6) | ⚠ config | 9-min safety kill; keep `BH26_AMBUSH_S` short enough to finish < 8 min |
 | Camera sees rover markers from 1.1 m hover | 🔴 untested | camera angle unconfirmed — test with `dronecheck.py --camera-angle N` |
 | Bonus: CUAS showcase + concept pitch (s10) | ✅ manual | non-code; START_HERE §10 |
@@ -180,8 +186,7 @@ Pre-U = **Challenge 2 only**: Stage A landings (44%) + Stage B ArUco ambush (44%
 (discover → connect → land → re-takeoff → yaw-scan ArUco search → land → report)
 is complete and tested in sim. The open items are validation/scoring, in order:
 
-1. 🔴 **Timing**: add early-exit from the ambush once all expected ArUco IDs are
-   detected across drones (directly improves the timed 44% Stage-B score).
+1. ✅ **Timing**: ambush early-exit on all-IDs-found — **done**.
 2. 🔴 **Camera angle**: confirm the camera actually sees floor markers from a
    hover (the only flight-independent unknown — testable now on the ground).
 3. ⚠ **Speed ≤ 0.5 m/s**: confirm the SLOW level complies.

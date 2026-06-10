@@ -260,6 +260,29 @@ A black window appears with text like `drone@hostname:~$` and a blinking cursor.
 
 This is the most useful thing to do first. **It proves the software works** and takes 25 seconds.
 
+### Easiest way: the interactive launcher 🚀
+
+You don't have to remember any commands — there's a menu. From the Stage 2 folder run:
+```bash
+cd ~/BrainHack-26/codes/finals
+python3 launch.py
+```
+You'll get a menu:
+```
+=== BrainHack-26 Finals - Stage 2 Launcher ===
+  1) Check a drone (camera / ArUco / telemetry) - NO flight
+  2) Run MOCK mission (simulator demo - safe)
+  3) Run REAL mission (fly the HULAs)
+  4) Configure landing pads & drone IPs
+  5) Run the tests (verify the code)
+  6) View results / snapshots
+  7) Help & network tips
+  0) Quit
+```
+**To prove the software works, pick `2` (mock mission).** For a real run pick `3` (it asks you to type `FLY` to confirm). This launcher is the recommended way for both the team and the judges — everything below is the manual equivalent if you prefer typing commands.
+
+### Or the manual way:
+
 **Step 1 — Open a terminal** (see §5 if you don't know how).
 
 **Step 2 — Go to the Stage 2 folder:**
@@ -344,10 +367,14 @@ The repo has a lot of files because it grew out of the Qualifier (which we passe
 
 | File | Purpose | When to look at it |
 |---|---|---|
-| `codes/finals/stage2_mission.py` | **The main program.** ~600 lines. State machine, navigation, ArUco detector, snapshot saver. | If you need to change behavior. |
-| `codes/finals/mocks/pyhulax_mock.py` | Fake-drone simulator for offline testing. ~310 lines. Includes real ArUco markers in synthetic video. | Almost never — it just works. |
-| `codes/finals/tests/test_stage2.py` | 18 automated tests. | Run after any change to `stage2_mission.py`. |
-| `codes/finals/run_stage2.sh` | Launcher script. | Every time you run the mission. |
+| `codes/finals/launch.py` | **The interactive launcher (menu).** Easiest entry point for everything. | **Start here** — `python3 launch.py`. |
+| `codes/finals/stage2_mission.py` | **The main program.** State machine, navigation, ArUco detector, snapshot saver. | If you need to change behavior. |
+| `codes/finals/dronecheck.py` | Non-flying drone check: camera + ArUco + telemetry (`--telemetry`/`--check`/`--camera-angle`). | To validate a drone on the ground. |
+| `codes/finals/configure.py` | Edit pad coordinates/availability + drone IPs. | When pads/IPs change. |
+| `codes/finals/mocks/pyhulax_mock.py` | Fake-drone simulator for offline testing. Includes real ArUco markers in synthetic video. | Almost never — it just works. |
+| `codes/finals/tests/test_stage2.py` | 41 automated tests. | Run after any change to `stage2_mission.py`. |
+| `codes/finals/run_stage2.sh` | Low-level launcher script (the launcher menu calls this kind of thing for you). | If you prefer command-line flags. |
+| `codes/finals/STATUS.md` | **Living project-status doc** — current state, brief audit, open items. | To get up to speed fast. |
 | `codes/finals/pads_example.json` | Sample pad list (for testing only). | When you need to test with custom pads. |
 | `codes/finals/competition_pads.json` | **The real Stage-2 landing points** (IDs 11/45/51/67/101, from Discord 2026-06-10). | On the day — set valid/invalid flags, then fly with it. |
 | `codes/finals/competition_pads.README.md` | Provenance + the valid-flag TODO for the pads file. | Read before flying the real mission. |
