@@ -582,6 +582,28 @@ class SearchTests(unittest.TestCase):
         drone = conns[0][2]
         self.assertEqual(getattr(drone, "_camera_angle", None), (45, 0))
 
+    def test_all_expected_found_across_drones(self):
+        saved = stage2_mission.EXPECTED_MARKER_IDS
+        stage2_mission.EXPECTED_MARKER_IDS = {11, 45, 51}
+        try:
+            m1 = self._mission(DroneAPI())
+            m2 = self._mission(DroneAPI())
+            m1.marker_ids_seen = {11, 45}
+            m2.marker_ids_seen = {51}
+            self.assertTrue(stage2_mission._all_expected_found([m1, m2]))
+            m2.marker_ids_seen = set()                 # 51 now missing
+            self.assertFalse(stage2_mission._all_expected_found([m1, m2]))
+        finally:
+            stage2_mission.EXPECTED_MARKER_IDS = saved
+
+    def test_all_expected_found_false_without_expected_set(self):
+        saved = stage2_mission.EXPECTED_MARKER_IDS
+        stage2_mission.EXPECTED_MARKER_IDS = set()
+        try:
+            self.assertFalse(stage2_mission._all_expected_found([self._mission(DroneAPI())]))
+        finally:
+            stage2_mission.EXPECTED_MARKER_IDS = saved
+
 
 if __name__ == "__main__":
     unittest.main()

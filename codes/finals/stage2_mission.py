@@ -85,6 +85,9 @@ Env vars (calibrate at the venue, see START_HERE.md §8)
     BH26_YAW_INTERVAL_S    seconds to dwell/watch between rotations, default 5
     BH26_CAMERA_ANGLE      camera tilt at connect, 0(forward)..90(down); empty
                            (default) leaves it. Find the value with dronecheck.py
+    BH26_AMBUSH_EARLY_EXIT "1" (default) end the ambush as soon as every expected
+                           ArUco ID is detected (faster = more timing points);
+                           "0" always runs the full window
 
 Units (CONFIRMED from https://pyhulax.xenops.ae/reference/pyhulax/)
 -------------------------------------------------------------------
@@ -189,6 +192,11 @@ SEARCH_ALT_M       = float(os.environ.get("BH26_SEARCH_ALT_M", "1.1"))
 # camera ~360 deg around the pad — a big coverage gain over a static hover, with
 # zero translation risk (still "hovering" per the brief). Step-and-stare: dwell
 # YAW_INTERVAL_S watching, then rotate YAW_STEP_DEG, repeat. Default ON.
+# Timing optimisation: end the ambush EARLY once every expected ArUco ID
+# (EXPECTED_MARKER_IDS) has been detected across all drones. Stage-B is scored on
+# timing, so finishing sooner = more points. Needs EXPECTED_MARKER_IDS non-empty.
+AMBUSH_EARLY_EXIT = os.environ.get("BH26_AMBUSH_EARLY_EXIT", "1") == "1"
+
 SEARCH_YAW_SCAN = os.environ.get("BH26_SEARCH_YAW_SCAN", "1") == "1"
 YAW_STEP_DEG    = float(os.environ.get("BH26_YAW_STEP_DEG", "45"))
 YAW_INTERVAL_S  = float(os.environ.get("BH26_YAW_INTERVAL_S", "5.0"))
@@ -390,9 +398,21 @@ def _safe_stop(m: DroneMission) -> None:
         print(f"[{m.plane_id}] safe-stop: land failed ({e!r})")
 
 
+def _all_expected_found(missions) -> bool:
+    """True once every expected ArUco ID has been seen across all drones.
+    False if there is no expected-ID set to check against."""
+    if not EXPECTED_MARKER_IDS:
+        return False
+    seen: set = set()
+    for m in missions:
+        seen |= m.marker_ids_seen
+    return EXPECTED_MARKER_IDS <= seen
+
+
 def run_drone_mission(
     m: DroneMission, stop_event: threading.Event,
     do_land: bool = True, do_search: bool = True,
+    found_all: Optional[threading.Event] = None,
 ) -> None:
     """Single drone's state machine. One thread per HULA.
 
@@ -463,7 +483,11 @@ def run_drone_mission(
             elif m.state == DroneState.AMBUSH_WATCH:
                 ambush_tick(m)            # detect ArUco on the current frame
                 _yaw_scan_tick(m)         # rotate in place to widen coverage
-                if m.time_in_state() >= AMBUSH_WINDOW_S:
+                early = found_all is not None and found_all.is_set()
+                if early:
+                    print(f"[{m.plane_id}] all expected ArUco IDs found - "
+                          f"ending search early (timing)")
+                if early or m.time_in_state() >= AMBUSH_WINDOW_S:
                     if DO_AERIAL_SEARCH and do_search:
                         m.transition(DroneState.FINAL_LAND)
                     else:
@@ -1118,13 +1142,16 @@ def main() -> int:
         ))
         print(f"[main] {plane_id} ({ip}) -> pad {pad.pad_id}")
 
-    # 4. One thread per drone
+    # 4. One thread per drone. `found_all` lets the supervisor end the ambush
+    #    early once every expected ArUco ID has been detected (timing score).
     stop = threading.Event()
+    found_all = threading.Event()
     threads = []
     for m in missions:
         t = threading.Thread(
             target=run_drone_mission, args=(m, stop),
-            kwargs={"do_land": do_land, "do_search": do_search},
+            kwargs={"do_land": do_land, "do_search": do_search,
+                    "found_all": found_all},
             name=f"drone-{m.plane_id}", daemon=True,
         )
         t.start()
@@ -1136,6 +1163,12 @@ def main() -> int:
         while time.time() - start_t < MISSION_TIMEOUT_S:
             if all(m.state in (DroneState.COMPLETE, DroneState.ERROR) for m in missions):
                 break
+            # Timing optimisation: signal early-exit once all expected IDs seen.
+            if (AMBUSH_EARLY_EXIT and not found_all.is_set()
+                    and _all_expected_found(missions)):
+                print(f"[main] all expected ArUco IDs {sorted(EXPECTED_MARKER_IDS)} "
+                      f"detected - ending ambush early")
+                found_all.set()
             time.sleep(0.5)
         else:
             print("[main] MISSION TIMEOUT - signalling stop")
