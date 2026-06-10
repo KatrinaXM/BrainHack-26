@@ -24,9 +24,9 @@ Faithful behaviours
   to a fake speed model, so the supervisor loop and threading model are
   exercised realistically.
 - `VideoStream` runs a background thread that produces 15 Hz synthetic
-  frames; every ~15-25 s a red "RoboMaster" patch appears for ~3 s so
-  the colour detector can fire and validate the snapshot pipeline end-
-  to-end.
+  frames; periodically a real ArUco marker (rendered with cv2.aruco) is
+  painted into the frame for ~3 s so the ArUco detector can fire and
+  validate the snapshot pipeline end-to-end.
 - `Dola.get_all_ips()` honours its `listen_seconds` arg (capped at 1 s
   for test speed) and returns 3 deterministic drone IDs by default.
 
@@ -36,8 +36,9 @@ Tunables (env vars)
     BH26_MOCK_TAKEOFF_S    seconds takeoff blocks for (default 2.0)
     BH26_MOCK_LAND_S       seconds land blocks for     (default 1.5)
     BH26_MOCK_SPEED_MPS    fake horizontal speed       (default 0.5, matches brief HULA cap)
-    BH26_MOCK_ROBO_FIRST   first robomaster appearance delay (s, default 4)
+    BH26_MOCK_ROBO_FIRST   first ArUco-marker appearance delay (s, default 4)
     BH26_MOCK_ROBO_PERIOD  mean seconds between appearances (default 12)
+    BH26_MOCK_MARKER_IDS   comma-separated ArUco IDs to cycle (default 1,2,3,4,5)
 
 Intentional limitations
 -----------------------
@@ -116,8 +117,9 @@ class VideoStream:
         self._rng = random.Random(hash(drone_id) & 0xFFFFFFFF)
 
         # Marker pool to cycle through. Comma-separated env var, e.g. "1,2,3".
-        # Default uses a small varied set so unique-ID counts grow during a run.
-        pool_str = os.environ.get("BH26_MOCK_MARKER_IDS", "1,2,3,4,5")
+        # Default = the real IDs the organizers said appear on the ground
+        # robots (Discord, 2026-06-10) so the mock exercises the real values.
+        pool_str = os.environ.get("BH26_MOCK_MARKER_IDS", "11,45,51,67,101")
         self._marker_pool = [int(s) for s in pool_str.split(",") if s.strip()]
         self._marker_idx = 0
 
@@ -161,14 +163,19 @@ class VideoStream:
                 self._latest = _Frame(frame)
             time.sleep(period)
 
-    def _make_marker_patch(self, marker_id: int, size: int = 120) -> np.ndarray:
+    def _make_marker_patch(self, marker_id: int, size: int = 160) -> np.ndarray:
         """Render an ArUco marker as an RGB patch using cv2.aruco.
 
-        Import cv2 lazily so the mock stays importable on cv2-less envs;
-        a missing cv2 makes _generate_frame silently skip the marker paint.
+        Uses the same dictionary the detector expects (BH26_ARUCO_DICT,
+        default DICT_7X7_1000) so the mock and the real detection path stay
+        in sync even if the dictionary is overridden. Import cv2 lazily so
+        the mock stays importable on cv2-less envs; a missing cv2 makes
+        _generate_frame silently skip the marker paint.
         """
         import cv2  # local import — keeps module-level import minimal
-        d = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
+        dict_name = os.environ.get("BH26_ARUCO_DICT", "DICT_7X7_1000")
+        dict_id = getattr(cv2.aruco, dict_name, cv2.aruco.DICT_7X7_1000)
+        d = cv2.aruco.getPredefinedDictionary(dict_id)
         gray = cv2.aruco.generateImageMarker(d, marker_id, size)
         # Convert to 3-channel RGB so we can paste into the frame buffer.
         return cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
@@ -214,6 +221,16 @@ class VideoStream:
 #  DroneAPI  (mirrors pyhulax.DroneAPI)
 # ============================================================================
 
+class _Vector3:
+    """Minimal stand-in for pyhulax's Vector3 (cm). Has .x/.y/.z."""
+
+    def __init__(self, x: float, y: float, z: float):
+        self.x, self.y, self.z = float(x), float(y), float(z)
+
+    def __repr__(self) -> str:
+        return f"Vector3(x={self.x:.1f}, y={self.y:.1f}, z={self.z:.1f})"
+
+
 class DroneAPI:
     """Mock pyhulax DroneAPI with a strict per-drone state machine.
 
@@ -235,20 +252,62 @@ class DroneAPI:
     _LAND_S = float(os.environ.get("BH26_MOCK_LAND_S", "1.5"))
     _SPEED_MPS = float(os.environ.get("BH26_MOCK_SPEED_MPS", "0.5"))
 
+    _CM_PER_M = 100.0   # real pyhulax distances are centimetres
+
     def __init__(self) -> None:
         self._state = self._State.DISCONNECTED
         self._ip: str | None = None
         self._video: VideoStream | None = None
         self._video_enabled = False
+        self._qr_localization = False
+        self._barrier_mode = False
+        # Tracked position in DRONE FRAME, centimetres: [forward, right, up]
+        # relative to the takeoff origin. Updated by takeoff/move/move_to so
+        # get_position() is consistent with the commands issued.
+        self._pos = [0.0, 0.0, 0.0]
+        self._battery = int(os.environ.get("BH26_MOCK_BATTERY", "100"))
         self._lock = threading.Lock()
 
     # ----- connection -----
 
-    def connect(self, ip: str) -> None:
+    def connect(self, ip: str | None = None, timeout: float = 5.0) -> None:
         time.sleep(0.05)
         with self._lock:
             self._ip = str(ip)
             self._state = self._State.ON_GROUND
+
+    def is_connected(self) -> bool:
+        with self._lock:
+            return self._state != self._State.DISCONNECTED
+
+    def set_qr_localization(self, enabled: bool) -> None:
+        # Real pyhulax: switches move_to between absolute (mat) and
+        # takeoff-relative coordinates. The mock just records the flag.
+        self._qr_localization = bool(enabled)
+
+    def set_barrier_mode(self, enabled: bool):
+        # Real pyhulax: enable/disable firmware obstacle avoidance.
+        self._barrier_mode = bool(enabled)
+
+    def set_camera_angle(self, mode, angle: int = 0):
+        # Real pyhulax: tilt the camera. Mock records the request.
+        self._camera_angle = (mode, angle)
+
+    def rotate(self, angle_degrees, led=None, blocking: bool = True):
+        # Real pyhulax: yaw rotate in place. Mock sleeps proportionally and
+        # records cumulative yaw so the search yaw-scan is exercised.
+        time.sleep(min(abs(float(angle_degrees)) / 180.0, 0.2))
+        with self._lock:
+            self._yaw_deg = getattr(self, "_yaw_deg", 0.0) + float(angle_degrees)
+
+    # ----- telemetry -----
+
+    def get_battery(self) -> int:
+        return self._battery
+
+    def get_position(self) -> "_Vector3":
+        with self._lock:
+            return _Vector3(self._pos[0], self._pos[1], self._pos[2])
 
     # ----- video -----
 
@@ -262,7 +321,9 @@ class DroneAPI:
 
     # ----- flight -----
 
-    def takeoff(self) -> None:
+    def takeoff(self, height_cm: int = 100, led=None,
+                blocking: bool = True, flags=0) -> None:
+        # Signature mirrors the real DroneAPI.takeoff(height_cm=100, ...).
         # Re-takeoff after landing is allowed — the Stage 2 mission flow
         # requires it (land on pad for scoring, then take off again to
         # search). The real pyhulax behaves the same way.
@@ -275,21 +336,60 @@ class DroneAPI:
             self._state = self._State.TAKING_OFF
         time.sleep(self._TAKEOFF_S)
         with self._lock:
+            self._pos[2] = float(height_cm)   # now at hover altitude
             self._state = self._State.HOVERING
 
-    def move(self, direction: Direction, distance: float) -> None:
-        # Keep type loose — real pyhulax accepts a Direction enum, but
-        # tests sometimes pass strings; tolerate both.
+    _DELTA = {
+        "FORWARD": (0, +1), "BACK": (0, -1),
+        "RIGHT": (1, +1), "LEFT": (1, -1),
+        "UP": (2, +1), "DOWN": (2, -1),
+    }
+
+    def move(self, direction: Direction, distance_cm: float, led=None,
+             blocking: bool = True, speed=None) -> None:
+        # Signature mirrors real DroneAPI.move(direction, distance_cm, ...).
+        # distance_cm is CENTIMETRES (per the official reference); convert to
+        # metres for the fake-speed timing model. Type kept loose — real
+        # pyhulax takes a Direction enum, but tests sometimes pass strings.
         with self._lock:
             if self._state != self._State.HOVERING:
                 raise RuntimeError(
                     f"move: invalid state {self._state.name} (must be HOVERING)"
                 )
             self._state = self._State.MOVING
-        dt = abs(float(distance)) / max(self._SPEED_MPS, 0.01)
+        dt = (abs(float(distance_cm)) / self._CM_PER_M) / max(self._SPEED_MPS, 0.01)
         time.sleep(dt)
         with self._lock:
+            # Track position so get_position() is consistent with the command.
+            name = getattr(direction, "name", str(direction)).upper()
+            if name in self._DELTA:
+                axis, sign = self._DELTA[name]
+                self._pos[axis] += sign * abs(float(distance_cm))
             self._state = self._State.HOVERING
+
+    def move_to(self, x: float, y: float, z: float, led=None,
+                blocking: bool = True, speed=None) -> None:
+        # Mirrors real DroneAPI.move_to(x, y, z, ...) — absolute (QR on) or
+        # takeoff-relative (QR off) straight-line flight. x/y/z are cm.
+        with self._lock:
+            if self._state != self._State.HOVERING:
+                raise RuntimeError(
+                    f"move_to: invalid state {self._state.name} (must be HOVERING)"
+                )
+            self._state = self._State.MOVING
+        dist_m = ((float(x) ** 2 + float(y) ** 2 + float(z) ** 2) ** 0.5) / self._CM_PER_M
+        time.sleep(dist_m / max(self._SPEED_MPS, 0.01))
+        with self._lock:
+            self._pos = [float(x), float(y), float(z)]
+            self._state = self._State.HOVERING
+
+    def hover(self, duration_seconds: float, led=None, blocking: bool = True) -> None:
+        # Real pyhulax: hold position for the given time. Mock just sleeps
+        # briefly and keeps HOVERING (used by the fail-safe stop path).
+        time.sleep(min(float(duration_seconds), 0.2))
+        with self._lock:
+            if self._state == self._State.MOVING:
+                self._state = self._State.HOVERING
 
     def land(self) -> None:
         with self._lock:

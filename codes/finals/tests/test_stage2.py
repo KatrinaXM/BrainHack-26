@@ -55,7 +55,9 @@ from mocks.pyhulax_mock import DroneAPI, Direction      # noqa: E402
 
 # ----- ArUco rendering helper for tests -----
 
-_ARUCO_DICT = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
+# Match the detector's default dictionary (DICT_7X7_1000, confirmed by
+# organizers 2026-06-10) so rendered test markers are actually detectable.
+_ARUCO_DICT = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_7X7_1000)
 
 
 def _frame_with_marker(marker_id: int, h: int = 480, w: int = 640,
@@ -245,15 +247,29 @@ class SnapshotTests(unittest.TestCase):
 # ============================================================================
 
 class _RecordingDroneAPI(DroneAPI):
-    """Mock DroneAPI subclass that records every .move() call for assertions."""
+    """Mock DroneAPI subclass that records movement calls for assertions.
+
+    Distances are recorded as passed to pyhulax — i.e. in DEVICE UNITS
+    (centimetres by default), after navigate_to_pad applies DIST_SCALE.
+    """
 
     def __init__(self):
         super().__init__()
         self.moves: list[tuple[str, float]] = []
+        self.move_tos: list[tuple[float, float, float]] = []
+        self.takeoff_heights: list[int] = []
 
-    def move(self, direction: Direction, distance: float) -> None:
-        self.moves.append((direction.name, float(distance)))
-        super().move(direction, distance)
+    def move(self, direction: Direction, distance_cm: float, **kwargs) -> None:
+        self.moves.append((direction.name, float(distance_cm)))
+        super().move(direction, distance_cm)
+
+    def move_to(self, x: float, y: float, z: float, **kwargs) -> None:
+        self.move_tos.append((float(x), float(y), float(z)))
+        super().move_to(x, y, z)
+
+    def takeoff(self, height_cm: int = 100, **kwargs) -> None:
+        self.takeoff_heights.append(int(height_cm))
+        super().takeoff(height_cm=height_cm)
 
 
 class NavigateTests(unittest.TestCase):
@@ -264,22 +280,68 @@ class NavigateTests(unittest.TestCase):
         d.takeoff()
         return d
 
-    def test_navigate_emits_down_forward_right_for_positive_pad(self):
+    def test_navigate_emits_forward_right_for_positive_pad(self):
         d = self._airborne_drone()
-        pad = Pad("P", 3.0, 2.0, 0.0, True)  # +x, +y, descend from 1.1m
-        navigate_to_pad(d, pad)
+        pad = Pad("P", 3.0, 2.0, 0.0, True)  # +x, +y, pad on the ground (z=0)
+        navigate_to_pad("t", d, pad)
         names = [n for n, _ in d.moves]
-        self.assertEqual(names, ["DOWN", "FORWARD", "RIGHT"])
-        # distances: 1.1 m down (from TAKEOFF_ALT_M), 3 m forward, 2 m right.
-        self.assertAlmostEqual(d.moves[0][1], 1.1, places=2)
-        self.assertAlmostEqual(d.moves[1][1], 3.0, places=2)
-        self.assertAlmostEqual(d.moves[2][1], 2.0, places=2)
+        # No descent leg: the drone cruises at altitude and land() drops it
+        # onto the pad. Distances are INTEGER cm (metres * DIST_SCALE = 100).
+        self.assertEqual(names, ["FORWARD", "RIGHT"])
+        self.assertEqual(d.moves[0], ("FORWARD", 300.0))
+        self.assertEqual(d.moves[1], ("RIGHT", 200.0))
+        # Every distance handed to pyhulax must be a whole number of cm.
+        for _, dist in d.moves:
+            self.assertEqual(dist, int(dist))
+
+    def test_navigate_splits_legs_over_500cm(self):
+        d = self._airborne_drone()
+        # 7.5 m forward (750 cm) and 5.5 m right (550 cm) both exceed the
+        # firmware's 500 cm single-move cap and must be split into hops.
+        pad = Pad("P", 7.5, 5.5, 0.0, True)
+        navigate_to_pad("t", d, pad)
+        fwd = [dist for name, dist in d.moves if name == "FORWARD"]
+        rt = [dist for name, dist in d.moves if name == "RIGHT"]
+        self.assertEqual(sum(fwd), 750.0)   # total distance preserved
+        self.assertEqual(sum(rt), 550.0)
+        for _, dist in d.moves:             # every hop within firmware limits
+            self.assertTrue(5 <= dist <= 500, f"hop {dist} out of [5, 500]")
+            self.assertEqual(dist, int(dist))
+
+    def test_navigate_climbs_only_when_pad_above_cruise(self):
+        d = self._airborne_drone()
+        # Pad hover 1 m ABOVE takeoff altitude → a single UP leg precedes the
+        # horizontal move; descending pads never emit a vertical leg.
+        pad = Pad("P", 1.0, 0.0, stage2_mission.TAKEOFF_ALT_M + 1.0, True)
+        navigate_to_pad("t", d, pad)
+        names = [n for n, _ in d.moves]
+        self.assertEqual(names, ["UP", "FORWARD"])
+        self.assertEqual(d.moves[0], ("UP", 100.0))
+
+    def test_navigate_move_to_mode_issues_single_absolute_call(self):
+        d = self._airborne_drone()
+        pad = Pad("P", 3.0, 2.0, 0.0, True)
+        saved = stage2_mission.NAV_MODE
+        stage2_mission.NAV_MODE = "move_to"
+        try:
+            navigate_to_pad("t", d, pad)
+        finally:
+            stage2_mission.NAV_MODE = saved
+        # No decomposed body-frame moves; exactly one move_to in cm.
+        self.assertEqual(d.moves, [])
+        self.assertEqual(len(d.move_tos), 1)
+        self.assertEqual(d.move_tos[0], (300.0, 200.0, 0.0))
+
+    def test_dist_scale_converts_metres_to_device_units(self):
+        # The unit fix: pyhulax wants centimetres, pad files are metres.
+        self.assertAlmostEqual(stage2_mission._to_device(1.1), 110.0, places=6)
+        self.assertAlmostEqual(stage2_mission._to_device(3.0), 300.0, places=6)
 
     def test_navigate_emits_back_left_for_negative_pad(self):
         d = self._airborne_drone()
         # Pad at takeoff altitude → no vertical move needed.
         pad = Pad("P", -3.0, -2.0, stage2_mission.TAKEOFF_ALT_M, True)
-        navigate_to_pad(d, pad)
+        navigate_to_pad("t", d, pad)
         names = [n for n, _ in d.moves]
         self.assertEqual(names, ["BACK", "LEFT"])
 
@@ -287,14 +349,14 @@ class NavigateTests(unittest.TestCase):
         d = self._airborne_drone()
         # Only +y, no vertical change.
         pad = Pad("P", 0.0, 2.0, stage2_mission.TAKEOFF_ALT_M, True)
-        navigate_to_pad(d, pad)
+        navigate_to_pad("t", d, pad)
         names = [n for n, _ in d.moves]
         self.assertEqual(names, ["RIGHT"])
 
     def test_navigate_skips_sub_epsilon_moves(self):
         d = self._airborne_drone()
         pad = Pad("P", 0.01, 0.02, stage2_mission.TAKEOFF_ALT_M, True)
-        navigate_to_pad(d, pad)
+        navigate_to_pad("t", d, pad)
         self.assertEqual(d.moves, [])
 
 
@@ -334,6 +396,191 @@ class MockInvariantsTests(unittest.TestCase):
         d.land()
         d.takeoff()      # must succeed
         d.land()
+
+
+class AvailabilityTests(unittest.TestCase):
+    """Landing-pad availability flag — only AVAILABLE pads get assigned."""
+
+    def _write(self, data) -> Path:
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+        json.dump(data, tmp)
+        tmp.close()
+        self.addCleanup(os.unlink, tmp.name)
+        return Path(tmp.name)
+
+    def test_load_pads_accepts_available_key_and_defaults_z(self):
+        path = self._write([
+            {"id": "7", "x": 2.5, "y": 5.5, "available": True},        # no z, new key
+            {"id": "10", "x": 5.5, "y": 5.5, "z": 0.0, "valid": False},  # legacy key
+        ])
+        pads = load_pads(path)
+        self.assertEqual(pads[0].z, 0.0)        # z defaulted
+        self.assertTrue(pads[0].valid)          # "available": true
+        self.assertFalse(pads[1].valid)         # legacy "valid": false honored
+
+    def test_select_pads_skips_unavailable(self):
+        pads = [
+            Pad("7", 0, 0, 0, True), Pad("8", 0, 0, 0, False),
+            Pad("10", 0, 0, 0, True), Pad("11", 0, 0, 0, False),
+            Pad("12", 0, 0, 0, True),
+        ]
+        chosen = select_pads(pads, 3)
+        self.assertEqual([p.pad_id for p in chosen], ["7", "10", "12"])
+
+    def test_select_pads_raises_when_too_few_available(self):
+        pads = [Pad("7", 0, 0, 0, True), Pad("8", 0, 0, 0, False),
+                Pad("9", 0, 0, 0, True)]
+        with self.assertRaises(RuntimeError):
+            select_pads(pads, 3)
+
+
+class DiscoveryTests(unittest.TestCase):
+    """Drone IPs come from BH26_HULA_IPS, drones.json, or dola — no dola needed."""
+
+    def tearDown(self):
+        os.environ.pop("BH26_HULA_IPS", None)
+        os.environ.pop("BH26_DRONES_FILE", None)
+
+    def test_manual_ips_bypass_dola(self):
+        os.environ["BH26_HULA_IPS"] = "10.0.0.1, 10.0.0.2 ,10.0.0.3"
+        ips = stage2_mission.discover_hulas()
+        self.assertEqual(ips, {
+            "plane1": "10.0.0.1",
+            "plane2": "10.0.0.2",
+            "plane3": "10.0.0.3",
+        })
+
+    def test_manual_ips_too_few_raises(self):
+        os.environ["BH26_HULA_IPS"] = "10.0.0.1"
+        with self.assertRaises(RuntimeError):
+            stage2_mission.discover_hulas()
+
+    def test_drones_json_used_when_no_env(self):
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+        json.dump({"1": "10.0.0.1", "2": "10.0.0.2", "3": "10.0.0.3"}, tmp)
+        tmp.close()
+        self.addCleanup(os.unlink, tmp.name)
+        os.environ.pop("BH26_HULA_IPS", None)
+        os.environ["BH26_DRONES_FILE"] = tmp.name
+        ips = stage2_mission.discover_hulas()
+        self.assertEqual(ips, {"1": "10.0.0.1", "2": "10.0.0.2", "3": "10.0.0.3"})
+
+
+class HardeningTests(unittest.TestCase):
+    """Fail-safe behaviour: result checks, battery gate, avoidance, feedback."""
+
+    def test_result_ok_variants(self):
+        self.assertTrue(stage2_mission._result_ok(None))        # mock / void
+        self.assertTrue(stage2_mission._result_ok(255))         # SUCCESS
+        self.assertFalse(stage2_mission._result_ok(241))        # a FAILED code
+
+        class OK:
+            name = "SUCCESS"
+
+        class Bad:
+            name = "FAILED_241"
+        self.assertTrue(stage2_mission._result_ok(OK()))
+        self.assertFalse(stage2_mission._result_ok(Bad()))
+
+    def test_cmd_raises_on_failed_result(self):
+        class FailDrone:
+            def move(self, *a, **k):
+                class R:
+                    name = "FAILED_241"
+                return R()
+        with self.assertRaises(stage2_mission.CommandFailed):
+            stage2_mission._cmd(FailDrone(), "t", "move", Direction.FORWARD, 100)
+
+    def _mission(self, drone) -> DroneMission:
+        return DroneMission(plane_id="t", ip="0", drone=drone, video=None,
+                            pad=Pad("P", 0.0, 0.0, 0.0, True))
+
+    def test_preflight_battery_low_raises(self):
+        class LowBatt(DroneAPI):
+            def get_battery(self):
+                return 5
+        with self.assertRaises(stage2_mission.CommandFailed):
+            stage2_mission._preflight_battery(self._mission(LowBatt()))
+
+    def test_preflight_battery_ok_passes(self):
+        stage2_mission._preflight_battery(self._mission(DroneAPI()))  # 100% — no raise
+
+    def test_connect_hulas_enables_barrier_mode(self):
+        conns = stage2_mission.connect_hulas({"1": "1.2.3.4"})
+        drone = conns[0][2]
+        self.assertTrue(getattr(drone, "_barrier_mode", False))
+
+    def test_verify_arrival_false_when_never_reaches(self):
+        from mocks.pyhulax_mock import _Vector3
+
+        class StuckDrone(DroneAPI):
+            def get_position(self):
+                return _Vector3(0, 0, 100)   # never moves toward target
+            def move(self, *a, **k):
+                return None                  # corrections have no effect
+        d = StuckDrone()
+        d.connect("1.2.3.4")
+        d.takeoff()
+        self.assertFalse(stage2_mission._verify_arrival("t", d, 300.0, 200.0))
+
+    def test_verify_arrival_true_when_at_target(self):
+        d = DroneAPI()
+        d.connect("1.2.3.4")
+        d.takeoff()
+        d.move(Direction.FORWARD, 300)
+        d.move(Direction.RIGHT, 200)
+        self.assertTrue(stage2_mission._verify_arrival("t", d, 300.0, 200.0))
+
+
+class SearchTests(unittest.TestCase):
+    """Yaw-scan search coverage + camera tilt."""
+
+    def _mission(self, drone) -> DroneMission:
+        return DroneMission(plane_id="t", ip="0", drone=drone, video=None,
+                            pad=Pad("P", 0.0, 0.0, 0.0, True))
+
+    def _rot_drone(self):
+        class RotDrone(DroneAPI):
+            def __init__(self):
+                super().__init__()
+                self.rotations = []
+
+            def rotate(self, deg, **k):
+                self.rotations.append(float(deg))
+                return None
+        return RotDrone()
+
+    def test_yaw_scan_rotates_after_interval(self):
+        d = self._rot_drone()
+        m = self._mission(d)
+        m.last_yaw_at = 1.0                          # far in the past
+        stage2_mission._yaw_scan_tick(m)
+        self.assertEqual(d.rotations, [stage2_mission.YAW_STEP_DEG])
+
+    def test_yaw_scan_skips_within_interval(self):
+        d = self._rot_drone()
+        m = self._mission(d)
+        m.last_yaw_at = stage2_mission.time.time()   # just rotated
+        stage2_mission._yaw_scan_tick(m)
+        self.assertEqual(d.rotations, [])
+
+    def test_yaw_scan_rotate_failure_does_not_raise(self):
+        class BadRot(DroneAPI):
+            def rotate(self, deg, **k):
+                raise RuntimeError("rotate rejected")
+        m = self._mission(BadRot())
+        m.last_yaw_at = 1.0
+        stage2_mission._yaw_scan_tick(m)             # must not raise
+
+    def test_camera_angle_set_at_connect(self):
+        saved = stage2_mission.CAMERA_ANGLE
+        stage2_mission.CAMERA_ANGLE = "45"
+        try:
+            conns = stage2_mission.connect_hulas({"1": "1.2.3.4"})
+        finally:
+            stage2_mission.CAMERA_ANGLE = saved
+        drone = conns[0][2]
+        self.assertEqual(getattr(drone, "_camera_angle", None), (45, 0))
 
 
 if __name__ == "__main__":

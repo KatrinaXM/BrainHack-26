@@ -14,6 +14,7 @@
 #   --mock         use the pyhulax mock (default if neither flag given)
 #   --real         use real pyhulax + dola (requires pyhulax installed)
 #   --pads PATH    pad-list JSON (default: pads_example.json next to this script)
+#   --ips LIST     comma-separated drone IPs — fly without dola (real mode)
 #   --phase PHASE  'both' (default), 'land' (just land), or 'search' (just search)
 #   --ambush S     ambush-watch window in seconds (default 120 for real, 30 for mock)
 #   --output DIR   snapshots directory (default ./snapshots)
@@ -45,6 +46,7 @@ while [[ $# -gt 0 ]]; do
         --mock)       MODE="mock";    shift ;;
         --real)       MODE="real";    shift ;;
         --pads)       PADS="$2";      shift 2 ;;
+        --ips)        export BH26_HULA_IPS="$2"; shift 2 ;;
         --phase)      PHASE="$2";     shift 2 ;;
         --ambush)     AMBUSH="$2";    shift 2 ;;
         --output)     OUTPUT="$2";    shift 2 ;;
@@ -91,10 +93,17 @@ if [[ "${MODE}" == "mock" ]]; then
         export BH26_AMBUSH_S="8"
     fi
 else
-    if ! "${PYTHON_BIN}" -c "import pyhulax; import dola" 2>/dev/null; then
-        echo "ERROR: pyhulax / dola not importable from ${PYTHON_BIN}." >&2
-        echo "Install them (hardware-day setup) or use --mock for offline testing." >&2
+    # pyhulax (with the video extra) is the hard requirement for --real.
+    if ! "${PYTHON_BIN}" -c "from pyhulax import DroneAPI; from pyhulax.video import VideoStream" 2>/dev/null; then
+        echo "ERROR: pyhulax (with the [video] extra) not importable from ${PYTHON_BIN}." >&2
+        echo "Install:  pip install \"pyhulax[video,vision]\"   (or use --mock)." >&2
         exit 1
+    fi
+    # dola is OPTIONAL — only needed for auto-discovery. If it's missing AND no
+    # IPs were supplied, warn (the run will fail at discovery with guidance).
+    if ! "${PYTHON_BIN}" -c "import dola" 2>/dev/null && [[ -z "${BH26_HULA_IPS:-}" ]]; then
+        echo "WARN: dola not installed and no --ips / BH26_HULA_IPS set." >&2
+        echo "      Get dola from the organizers, OR pass --ips ip1,ip2,ip3 to fly without it." >&2
     fi
 fi
 
