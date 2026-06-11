@@ -379,4 +379,421 @@ With those, I can write `mission.py` that **drops in correctly** on your machine
 
 ---
 
-*End of runbook. Phase 1 alone (~4 hours) gets you from zero to "every subsystem confirmed working". That's the highest-leverage time investment in this whole project — every bug found here saves you 10× later.*
+*End of qualifier runbook. Phase 1 alone (~4 hours) gets you from zero to "every subsystem confirmed working". That's the highest-leverage time investment in this whole project — every bug found here saves you 10× later.*
+
+---
+
+# PART 2 — Finals Runbook
+
+> Same structure as Part 1: phases top-to-bottom, each ending with a **GATE**. Skip nothing.
+>
+> **Estimated time:** ~30 hours total spread across the prep window. Plan ahead — every flight test needs battery charging and arena access.
+
+## Phase 7 — Pre-arena prep (offline; do before you have hardware access)
+
+You can do most of this on any Linux laptop while waiting for the venue.
+
+### 7.1 Read Part 2 of TUTORIAL.md
+
+Mandatory before touching code. The Finals vocabulary (UWB, ArUco, RKNN, pyhulax) doesn't appear in Part 1.
+
+### 7.2 Read kolomee.py end-to-end
+
+It's 406 lines and is the reference architecture for the Mapping Drone. Read it with `docs/kolomee_dissection.md` open next to you. By the end you should be able to explain:
+
+- Why `rclpy.spin` runs in a daemon thread.
+- Why the yaw is locked at takeoff and never changed.
+- Why the P-controller uses different gains in `hover()` vs `fly_to_position_velocity()`.
+- What the `for _ in range(20): send_velocity(0,0,0)` block does before `offboard.start()`.
+
+### 7.3 Set up the model-conversion toolchain on your laptop
+
+This step can be done with no drone present.
+
+```bash
+# Create a clean conda env (rknn-toolkit2 doesn't play nicely with system Python)
+conda create -n rknn python=3.10 -y
+conda activate rknn
+pip install ultralytics onnx onnxruntime
+pip install rknn-toolkit2 -i https://pypi.org/simple/
+```
+
+Then export a sample model:
+
+```bash
+yolo export model=yolov11n.pt format=onnx opset=12
+python3 references/finalist_codes/model_convert/convertrknn.py     # produces yolov11n.rknn
+```
+
+If this builds without error you're ready to convert custom-trained models later.
+
+### 7.4 GATE 7
+
+- [ ] You can recite Part 2 §20 (UWB) and §22 (ArUco) without re-reading.
+- [ ] `yolo export … format=onnx` succeeds on your laptop.
+- [ ] `rknn-toolkit2` builds a `.rknn` from the ONNX without errors.
+- [ ] You can answer "why does kolomee.py lock the yaw at takeoff?" without looking.
+
+---
+
+## Phase 8 — Mapping-drone first contact
+
+This is the first hardware step. The drone arrives in a charged state from the venue.
+
+### 8.1 Get into the mapping drone via NoMachine
+
+1. Power the mapping drone (it brings up its own WiFi hotspot OR joins the venue's network — confirm with organisers).
+2. Join that network from the C2 Terminal.
+3. Open NoMachine, point it at the drone's IP (visible in the venue documentation).
+4. Log in with the credentials provided.
+
+You should see a full Ubuntu 22.04 desktop. **This is your dev environment for Stage 1 — write code here, not on the C2 laptop.**
+
+### 8.2 Smoke-test ROS2 and UWB
+
+In the mapping drone's terminal:
+
+```bash
+ros2 topic list                          # expect to see /uwb_tag and others
+ros2 topic info /uwb_tag -v              # confirm message type is PoseStamped, note QoS
+ros2 topic hz /uwb_tag                   # expect ~10 Hz
+ros2 topic echo /uwb_tag --once          # expect a PoseStamped message
+```
+
+If `hz` shows 0.0 or `echo` blocks → UWB infrastructure isn't live; ping the organiser. If the topic exists but `echo` is silent → QoS mismatch; try the env variable trick from Tutorial §25.5.
+
+### 8.3 Smoke-test RealSense
+
+```bash
+# Quick command-line frame grab
+realsense-viewer       # graphical, may not work over NoMachine
+# OR pure Python
+python3 references/finalist_codes/realsense_cam/getRGB.py
+```
+
+Confirm a colour window opens with the drone's view. If `RuntimeError: No device connected`:
+
+- Check `lsusb | grep -i intel` — RealSense should appear as Intel Corp. RealSense Camera.
+- Check `lsusb -t` — confirm USB3 (not USB2) link. USB2 throttles to ~6 fps and breaks `align()`.
+- Power-cycle the camera (unplug + replug). The first init after boot is sometimes flaky.
+
+### 8.4 GATE 8
+
+- [ ] NoMachine remote desktop works at acceptable lag.
+- [ ] `ros2 topic hz /uwb_tag` shows ≥ 5 Hz.
+- [ ] You see a live `getRGB.py` window with the drone's view.
+- [ ] `pip show pyrealsense2` confirms version ≥ 2.50.
+
+---
+
+## Phase 9 — Mapping-drone navigation (kolomee-based)
+
+Goal: take off, hover for 5 s, land — autonomously.
+
+### 9.1 Copy kolomee.py into your working directory
+
+```bash
+mkdir -p ~/finals/codes
+cp /path/to/repo/references/finalist_codes/uwb_mavsdk/kolomee.py ~/finals/codes/
+```
+
+Edit one line — replace the serial path with whatever the mapping drone uses:
+
+```python
+await drone.connect(system_address="serial:///dev/ttyS6:921600")  # ← check this matches the drone's wiring
+```
+
+(MAVSDK accepts `serial://`, `udp://`, or `tcp://`. The mapping drone is typically wired serial; verify with the organiser.)
+
+### 9.2 Stand back, run it
+
+```bash
+cd ~/finals/codes
+python3 kolomee.py
+```
+
+The script prompts `Do you want to proceed? (y/n):` before arming — that's intentional safety. Confirm visually clear, type `y`, watch.
+
+Expected sequence:
+1. UWB position log → confirms position broadcast working.
+2. Arming → drone armed.
+3. 20 zero-velocity setpoints sent (the "offboard warmup").
+4. Offboard mode entered.
+5. Drone takes off to 0.8 m.
+6. Flies to waypoint 1 (1 m north).
+7. Flies to waypoint 2 (1 m east-of-start).
+8. Lands and disarms.
+
+### 9.3 Common failure modes
+
+- **`PreflightCheck` rejection** → flight controller refuses to arm. Causes: low battery (replace), poor GPS health flag (irrelevant indoors but PX4 may still expect it — check the airframe params), missing accelerometer calibration.
+- **`Offboard not allowed`** → you forgot the 20 zero-velocity setpoints. They must be sent **before** `offboard.start()`.
+- **Drone takes off but drifts** → UWB swap (Tutorial §20.2). Walk the drone manually north; verify `current_n` increases, not `current_e`. If swapped, fix the `n = pose.position.y` / `e = pose.position.x` lines.
+- **Drone overshoots and oscillates** → `KP_XY` too high or UWB noisy. Lower to 0.07, raise `MAX_VEL_XY` ceiling, slow loop to 5 Hz.
+
+### 9.4 GATE 9
+
+- [ ] One full takeoff-→-2-waypoint-→-land cycle without manual override.
+- [ ] Walked-test confirms UWB north/east axes are correctly oriented.
+- [ ] You can answer: "What happens if UWB drops for 2 s mid-flight?" (answer: kolomee logs "UWB data not ready, cannot navigate" and sends `(0,0,0)`).
+
+---
+
+## Phase 10 — ArUco detection bench
+
+Goal: detect a printed ArUco marker from the drone's camera, on the bench (not in flight).
+
+### 10.1 Print test markers
+
+On a colour printer, generate the markers using the **competition dictionary
+and IDs** (`DICT_7X7_1000`, IDs 11/45/51/67/101 — confirmed by organizers
+2026-06-10) so your practice markers match what you'll see on the day:
+
+```python
+import cv2
+arucoDict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_7X7_1000)
+for marker_id in [11, 45, 51, 67, 101]:
+    img = cv2.aruco.generateImageMarker(arucoDict, marker_id, 600)
+    cv2.imwrite(f"marker_{marker_id}.png", img)
+```
+
+Print each at **~10 cm side length** on white paper. Stick them to a wall or stand.
+
+### 10.2 Run the detection script on the drone
+
+Adapt the snippet from `references/finalist_codes/aruco_detection/aruco_detection.py` (clean up the indentation first — the published version has a bug on lines 11-12). Use the RealSense pipeline:
+
+```python
+# Full skeleton in TUTORIAL.md §22.2
+```
+
+Hold the drone (powered off) and point the camera at each marker. Confirm:
+- ID is decoded correctly.
+- Detection works at 0.5 m, 2 m, 4 m distance.
+- (X, Y, Z) values from depth back-projection look sensible.
+
+### 10.3 GATE 10
+
+- [ ] At least 4 different marker IDs detect cleanly at ≥2 m.
+- [ ] Detection survives gentle motion (hand-held panning).
+- [ ] You know your "valid vs invalid" ID scheme (asking the organiser if needed).
+
+---
+
+## Phase 11 — RKNN smoke test on the drone
+
+Goal: run a YOLO model on the NPU at the documented ~50 fps.
+
+### 11.1 Get a `.rknn` file onto the drone
+
+```bash
+# On your laptop (with rknn-toolkit2 environment activated):
+python3 references/finalist_codes/model_convert/convertyolotoonnx.py
+python3 references/finalist_codes/model_convert/convertrknn.py
+# Produces yolo11n.rknn (or similar)
+
+# Transfer to drone
+scp yolo11n.rknn user@mappingdrone:~/finals/models/
+```
+
+### 11.2 Confirm rknnlite runtime works
+
+```bash
+ssh user@mappingdrone
+cd ~/finals
+python3 references/finalist_codes/rknn_detect/testrknn_with_display.py
+```
+
+Replace the RKNN_MODEL path. Expected: opens an OpenCV window showing the test image with bounding boxes. Confidence threshold 0.25 may be too tight for a stock model — drop to 0.1 to see *any* output, then verify behaviour.
+
+### 11.3 Benchmark fps
+
+```python
+import time
+# After model loaded:
+N = 100
+t0 = time.time()
+for _ in range(N):
+    out = rknn.inference(inputs=[img])
+print(f"NPU inference: {N/(time.time()-t0):.1f} fps")
+```
+
+Expect ~50 fps for yolov11n on RK3588 with `NPU_CORE_AUTO`. Anything under 20 fps → check core mask, check input size matches the model's expected size, check NHWC vs NCHW.
+
+### 11.4 GATE 11
+
+- [ ] `.rknn` loads on the drone without error.
+- [ ] Inference returns non-empty output arrays.
+- [ ] Throughput ≥ 25 fps for yolov11n-class model.
+
+---
+
+## Phase 12 — Stage 1 integration: lawnmower + ArUco logging
+
+Goal: drone flies a predetermined path, logs every ArUco it sees with arena coordinates, produces a top-down summary.
+
+### 12.1 Architecture
+
+Single-file mission script `stage1_mission.py`:
+
+```
+┌── UwbNode (ROS2 thread)
+├── RealSense pipeline (worker thread)
+├── ArUco detector (per-frame, in worker thread)
+├── ArucoLogger (writes detections to ./aruco_log.json)
+└── MissionLoop (asyncio)
+    1. takeoff via kolomee primitives
+    2. for each waypoint in lawnmower_grid:
+         await fly_to_position_velocity(wp_n, wp_e, -1.5)
+         await hover(2.0)        # let ArUco detector capture
+    3. land
+```
+
+### 12.2 Lawnmower waypoints
+
+Hardcode for the venue. Example (4×4 m arena, 1 m spacing, 1 row at altitude 1.5 m):
+
+```python
+WAYPOINTS = [(0, 0), (0, 1), (0, 2), (0, 3),
+             (1, 3), (1, 2), (1, 1), (1, 0),
+             (2, 0), (2, 1), (2, 2), (2, 3)]
+```
+
+Replace with the actual arena dimensions once you have them.
+
+### 12.3 Top-down deliverable
+
+The Finals expect a **top-down depth map**. Generate it from accumulated RealSense point clouds — see `references/finalist_codes/realsense_cam/generateTopDown.py`. Output: a single PNG file showing occupancy (free/occupied/unknown).
+
+### 12.4 GATE 12
+
+- [ ] Drone completes the lawnmower without crashing.
+- [ ] `aruco_log.json` contains all visible markers with positions.
+- [ ] Top-down PNG saved and visually correct (you can see arena floor + obstacles).
+
+---
+
+## Phase 13 — Stage 2 integration: HULA swarm
+
+### 13.1 Verify HULA discovery from the C2 Terminal
+
+This step runs on the **C2 Terminal**, *not* the mapping drone. From the Ubuntu VM on the C2:
+
+```bash
+pip install "pyhulax[video,vision]"   # PyPI — the [video] extra is REQUIRED
+# dola is vendor-provided (NOT the broken PyPI 'dola') — get it from organizers
+python3 - <<'EOF'
+from dola import Dola
+d = Dola(); d.start()
+try:
+    ips = d.get_all_ips(listen_seconds=5)
+    print(f"Discovered: {ips}")
+finally:
+    d.stop()
+EOF
+```
+
+Expect a dict of `{plane_id: ip}` for each powered HULA.
+
+### 13.2 Single-drone control test
+
+Pick one HULA, connect, takeoff, hover 5 s, land. Verify video stream renders.
+
+### 13.3 Three-drone parallel test
+
+Skeleton: one Python thread per drone, each running its own state machine. Shared resources (chosen landing zones, completion flags) behind `threading.Lock`.
+
+> **pyhulax API — confirmed facts** (from the official reference,
+> <https://pyhulax.xenops.ae/reference/pyhulax/>, cross-checked 2026-06-10).
+> These are now reflected in `codes/finals/stage2_mission.py`:
+> - **Distances are CENTIMETRES**, not metres: `move(direction, distance_cm)`,
+>   `takeoff(height_cm=100)`, `move_to(x, y, z)` (cm), `get_position()` → cm.
+>   Pad files are metres → the orchestrator multiplies by `BH26_DIST_SCALE`
+>   (default 100). **This was a latent 100× bug; now fixed.**
+> - **`takeoff()` default is 100 cm (1.0 m)** — we pass `height_cm=110` for
+>   the brief's 1.1 m.
+> - **`move_to(x, y, z)` DOES accept coordinates** (the old "HULA doesn't
+>   accept world coordinates" note was wrong). With QR localization OFF it's
+>   relative to the takeoff origin; with `set_qr_localization(True)` it's
+>   ABSOLUTE on the arena mat. Selectable via `BH26_NAV_MODE=move_to` +
+>   `BH26_QR_LOCALIZATION=1`.
+> - Useful extras now known to exist: `get_battery()`, `get_position()`,
+>   `hover(duration_seconds)`, `rotate(angle_degrees)`, and a closed-loop
+>   `create_flight_controller().fly_to(x, y, z, yaw)`.
+> - **Still unverified by docs** (test at the venue): whether `takeoff()`
+>   works again after `land()`, and the exact axis orientation of move/move_to.
+>
+> **ArUco + pads — confirmed by organizers (Discord, 2026-06-10):**
+> - Dictionary `DICT_7X7_1000`, marker IDs `11, 45, 51, 67, 101`, on the
+>   GROUND ROBOTS (Stage-2 landing points carry no markers). Wired into
+>   `stage2_mission.py` (`BH26_ARUCO_DICT` default + `BH26_EXPECTED_IDS`).
+> - The 5 Stage-2 landing points are staged in `codes/finals/competition_pads.json`
+>   (IDs 11/45/51/67/101; metres; set valid flags on the day).
+> - HULA hardware manual: <https://ds-api.hg-fly.net/manuals/Hula_EN.html>
+>   (max 10 m AGL, 3 m/s — hardware/APP, not SDK).
+
+### 13.4 Mission integration
+
+Each HULA's mission (Pre-U Stage 2 per Finals brief):
+1. Discovery (Dola).
+2. Receive target landing zone (x, y, z) from organizer Discord post.
+3. Takeoff (to `height_cm=110` for the brief's 1.1 m).
+4. Fly to the target. Two strategies, both implemented in `stage2_mission.py`:
+   (a) `BH26_NAV_MODE=move` (default) — sequential body-frame `move()` steps
+   decomposed from the pad delta, under the locked-yaw assumption; or
+   (b) `BH26_NAV_MODE=move_to` — one `move_to(x, y, z)` straight-line flight
+   (relative to takeoff origin, or absolute with `BH26_QR_LOCALIZATION=1`).
+   All distances auto-scaled metres→cm via `BH26_DIST_SCALE`.
+5. Land on pad (Scoring Item 1: number of landings within hoop).
+6. Brief pad-hold (convoy enters cage).
+7. **Take off again** to ~1.1 m hover altitude (brief: "recommended height is 1.1m").
+8. Run ArUco detection on the live video stream — log every decoded ID.
+9. End-of-window: final land.
+10. Scoring Item 2: number of ArUco detections logged.
+
+### 13.5 GATE 13
+
+- [ ] All 3 HULAs discovered + connected within ≤ 10 s.
+- [ ] Each can takeoff/land independently from the C2 terminal.
+- [ ] Three parallel takeoffs work without deadlock.
+- [ ] cv2.aruco runs on snapshot frames from a HULA's video stream and decodes test markers correctly.
+- [ ] **Re-takeoff after landing works** (Stage 2 mission requires landing then taking off again — docs don't confirm this; verify on hardware FIRST, it gates the whole two-phase mission).
+- [ ] **Distance units confirmed**: command a 2 m move and measure it. If the drone flies ~2 m, `BH26_DIST_SCALE=100` (cm) is right; if it barely twitches (~2 cm) something is off; if it flies ~200 m it's already metres → set `BH26_DIST_SCALE=1`.
+
+---
+
+## Phase 14 — Full mission dress rehearsal
+
+Run Stage 1 + Stage 2 end-to-end on the actual arena, in the time budget the Finals will use. Log everything.
+
+### 14.1 Run sheet
+
+T+0:00  Stage 1 starts. Operator presses run button on mapping drone.
+T+0:05  Mapping drone airborne; logging ArUco.
+T+0:08  Mapping drone landed; ArUco log finalised.
+T+0:09  Stage 1 results loaded into Stage 2 strategy code on C2.
+T+0:10  HULAs discovered + connected.
+T+0:11  HULAs airborne.
+T+0:14  HULAs landed on chosen pads. Begin convoy detection.
+T+0:17  Convoy snapshot capture phase.
+T+0:20  Mission end.
+
+Adjust to actual venue timing.
+
+### 14.2 GATE 14
+
+- [ ] One full end-to-end run completed without manual intervention.
+- [ ] All artefacts produced: ArUco log, top-down PNG, HULA landing positions, RoboMaster snapshots.
+
+---
+
+## Phase 15 — Competition day
+
+Same idea as Qualifier Phase 5: USB stick contents, pre-run checklist, behaviour during run. Adapt the deliverables list to the Stage 1 / Stage 2 outputs.
+
+`★ Insight ─────────────────────────────────────`
+- The Finals are **much more sequenced** than the Qualifier was. Stage 1's output feeds Stage 2 directly. If your Stage-1 ArUco log is bad, your Stage-2 landings target the wrong pads. Test the **data interchange** between stages early (a JSON schema is enough).
+- The single biggest time risk in a real-hardware comp is **battery management**. Flight time per HULA is ~3-5 minutes. Have ≥2 charged batteries per drone, and a charge plan that accounts for inter-rehearsal cooldown.
+`─────────────────────────────────────────────────`
+
+*End of finals runbook. Phase 7-8 alone (Tutorial + first hardware contact) get you out of "what is this hardware" mode and into "I can iterate" mode. That's the hardest psychological transition; everything after is mechanical.*

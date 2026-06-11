@@ -1,0 +1,50 @@
+#!/bin/sh
+#
+# @name Gazebo x500 vision (EKF-tuned)
+#
+# @type Quadrotor
+#
+# EKF2 EV-fusion tuning for the gz-sim-odometry-publisher plugin.
+# The plugin emits Gazebo ground-truth pose (essentially zero-noise) at
+# ~50 Hz. The PX4 defaults are tuned for noisy real VIO; with the perfect
+# SITL pose we want EKF2 to trust the EV stream tightly.
+
+PX4_SIM_MODEL=${PX4_SIM_MODEL:=x500_vision}
+
+# Enable External Vision (EV) fusion for position and yaw.
+param set-default EKF2_EV_CTRL 3
+
+# Vision as the primary height source.
+param set-default EKF2_HGT_REF 3
+
+# Disable GPS (Qualifier rule).
+param set-default EKF2_GPS_CTRL 0
+
+# --- EV noise tuning (real PX4 param names; see params_external_vision.yaml) ---
+# Trust EV position tightly (default 0.1 m → 0.02 m).
+param set-default EKF2_EVP_NOISE 0.02
+
+# Trust EV attitude tightly (default 0.05 rad → 0.02 rad).
+param set-default EKF2_EVA_NOISE 0.02
+
+# Trust EV velocity (default 0.1 m/s → 0.05 m/s).
+param set-default EKF2_EVV_NOISE 0.05
+
+# Don't auto-scale EV noise (default 1 = scale with motion).
+# Our EV is ground-truth — scaling makes EKF distrust during fast moves.
+param set-default EKF2_EV_NOISE_MD 0
+
+# Widen the innovation gate so the EKF accepts larger jumps (e.g. after
+# collisions) instead of rejecting them as outliers.
+param set-default EKF2_EVP_GATE 7
+param set-default EKF2_EVV_GATE 7
+
+# Reduce EV delay (default 175 ms). gz_bridge is in-process; latency is
+# essentially one frame (~20 ms).
+param set-default EKF2_EV_DELAY 20
+
+# Extend "no aiding" timeout so a brief EV blip doesn't trigger reset
+# (default 5 s → 10 s).
+param set-default EKF2_NOAID_TOUT 10000000
+
+. ${R}etc/init.d-posix/airframes/4001_gz_x500
